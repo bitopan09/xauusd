@@ -1,0 +1,33 @@
+{
+  "name": "xauusd-trading-bot",
+  "version": "1.0.0",
+  "description": "XAU/USD Gold Trading Bot with Real-time Bybit WebSocket Feed",
+  "engines": {
+    "node": "20.x"
+  },
+  "main": "index.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "build": "cd frontend && npm install && npm run build",
+    "dev:backend": "cd backend && PORT=5002 node server.js",
+    "dev:frontend": "cd frontend && npm run dev",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["xauusd", "gold", "trading", "bot"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "node-fetch": "^2.6.7",
+    "node-schedule": "^2.1.1",
+    "nodemailer": "^8.0.7",
+    "sqlite3": "^6.0.1",
+    "telegram-bot-api": "^2.0.1",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "localtunnel": "^2.0.2"
+  }
+}

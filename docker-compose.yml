@@ -1,0 +1,11 @@
+version: '3.8'
+services:
+  goldforge:
+    build: .
+    ports:
+      - "5002:5002"
+    env_file:
+      - .env
+    volumes:
+      - ./trading.db:/app/trading.db
+    restart: unless-stopped
