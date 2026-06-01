@@ -88,19 +88,16 @@ class TradingBot {
             // Fetch live 6H candles from Bybit for XAU/USD
             const symbol = 'XAUUSDT';
             const interval = '360'; // 6h candles
+            const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=200`;
             
-            const response = await fetch(`https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=200`, {
-                headers: {
-                    'Accept': 'application/json'
-                }
-            });
-            
-            if (!response.ok) {
-                console.error('Failed to fetch live XAU candles from Bybit:', response.status);
+            let json;
+            try {
+                json = await this._fetchBybitData(url);
+            } catch (err) {
+                console.error('Failed to fetch live XAU candles (direct and proxy):', err.message);
                 return;
             }
             
-            const json = await response.json();
             if (!json || json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) {
                 console.error('Invalid Bybit response for XAU candles');
                 return;
@@ -217,13 +214,10 @@ class TradingBot {
                 
                 while (remaining > 0) {
                     const chunkLimit = Math.min(remaining, 200);
+                    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${chunkLimit}&end=${end}`;
                     
-                    const response = await fetch(`https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${chunkLimit}&end=${end}`, {
-                        headers: { 'Accept': 'application/json' }
-                    });
-                    
-                    const json = await response.json();
-                    if (json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) break;
+                    const json = await this._fetchBybitData(url);
+                    if (!json || json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) break;
                     
                     allCandles = allCandles.concat(json.result.list);
                     
@@ -388,6 +382,33 @@ class TradingBot {
         } catch (error) {
             console.error('XAU backtest error:', error);
             throw error;
+        }
+    }
+
+    /**
+     * Helper to fetch data from Bybit, with automatic proxy fallback for blocked cloud IPs (e.g. Railway)
+     */
+    async _fetchBybitData(url) {
+        try {
+            const response = await fetch(url, { headers: { 'Accept': 'application/json' }, timeout: 8000 });
+            if (response.ok) {
+                const json = await response.json();
+                if (json && json.retCode === 0) return json;
+            }
+            throw new Error(`Direct fetch failed with status ${response.status}`);
+        } catch (directErr) {
+            console.log(`Direct Bybit fetch failed (${directErr.message}), falling back to proxy...`);
+            try {
+                const proxyUrl = `https://api.codetabs.com/v1/proxy/?quest=${url.replace(/&/g, '%26')}`;
+                const proxyResponse = await fetch(proxyUrl, { headers: { 'Accept': 'application/json' }, timeout: 12000 });
+                if (proxyResponse.ok) {
+                    const proxyJson = await proxyResponse.json();
+                    if (proxyJson && proxyJson.retCode === 0) return proxyJson;
+                }
+                throw new Error(`Proxy fetch failed with status ${proxyResponse.status}`);
+            } catch (proxyErr) {
+                throw new Error(`All fetch methods failed. Last error: ${proxyErr.message}`);
+            }
         }
     }
 
