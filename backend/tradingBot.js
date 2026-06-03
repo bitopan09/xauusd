@@ -143,6 +143,7 @@ class TradingBot {
                     originalSl: sl,
                     tp1: tp1,
                     tp2: tp2,
+                    atr: riskParams.atr, // Pass ATR so ExecutionEngine uses correct trailing stop thresholds
                     score: decision.details.score,
                     notes: decision.details.analysis.confluenceScorer?.details || ''
                 };
@@ -278,7 +279,7 @@ class TradingBot {
                     const exitResult = uStrategy.checkTradeExit(activeTrade, currentCandle);
                     if (exitResult.closed) {
                         equity += exitResult.pnl;
-                        if (equity < initialEquity) equity = initialEquity;
+                        // No equity floor — let backtest reflect real losses accurately
                         if (exitResult.pnl < 0) {
                             consecutiveLosses++;
                             if (consecutiveLosses >= 2) { cooldownCandles = 3; consecutiveLosses = 0; }

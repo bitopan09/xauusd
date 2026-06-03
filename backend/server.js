@@ -61,8 +61,14 @@ db.serialize(() => {
     tp2 REAL,
     exit_reason TEXT,
     exit_timestamp DATETIME,
-    trade_type TEXT DEFAULT 'live'
+    trade_type TEXT DEFAULT 'live',
+    atr REAL,
+    original_sl REAL
   )`);
+
+    // Migrate existing databases: add new columns if they don't exist
+    db.run(`ALTER TABLE trades ADD COLUMN atr REAL`, () => {});
+    db.run(`ALTER TABLE trades ADD COLUMN original_sl REAL`, () => {});
 
     db.run(`CREATE TABLE IF NOT EXISTS balance (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

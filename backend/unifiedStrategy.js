@@ -256,51 +256,72 @@ class UnifiedStrategy {
         const recentVol = priceData.slice(-5).reduce((s, p) => s + (p.volume || 1), 0) / 5;
         const prevVol = priceData.slice(-10, -5).reduce((s, p) => s + (p.volume || 1), 0) / 5;
 
-        let score = 0;
+        // Track bullish and bearish confluence SEPARATELY
+        let bullScore = 0, bearScore = 0;
         const details = [];
 
         // Factor 1: EMA-50 Trend
-        const trendBullish = currentPrice > ema50Val && currentPrice > prevPrice;
-        const trendBearish = currentPrice < ema50Val && currentPrice < prevPrice;
-        if (trendBullish || trendBearish) { score++; details.push('Trend aligned'); }
+        if (currentPrice > ema50Val && currentPrice > prevPrice) { bullScore++; details.push('Trend ↑'); }
+        else if (currentPrice < ema50Val && currentPrice < prevPrice) { bearScore++; details.push('Trend ↓'); }
 
-        // Factor 2: RSI Confirmation
-        const rsiBullish = rsi > 40 && rsi < 65;
-        const rsiBearish = rsi > 35 && rsi < 60;
-        if (rsiBullish || rsiBearish) { score++; details.push(`RSI: ${rsi.toFixed(1)}`); }
+        // Factor 2: RSI Confirmation (tighter, direction-specific ranges)
+        if (rsi > 45 && rsi < 65) { bullScore++; details.push(`RSI: ${rsi.toFixed(1)} (bull zone)`); }
+        else if (rsi > 35 && rsi < 55) { bearScore++; details.push(`RSI: ${rsi.toFixed(1)} (bear zone)`); }
 
-        // Factor 3: MACD Confirmation
-        if (macd.histogram > 0 || macd.histogram < 0) { score++; details.push('MACD confirmed'); }
+        // Factor 3: MACD Confirmation (FIXED: requires meaningful magnitude, not just != 0)
+        const macdThreshold = currentPrice * 0.0001; // 0.01% of price = ~$0.44 for gold at $4400
+        if (macd.histogram > macdThreshold) { bullScore++; details.push('MACD bull'); }
+        else if (macd.histogram < -macdThreshold) { bearScore++; details.push('MACD bear'); }
 
         // Factor 4: CPR PP Alignment (tighter for gold — 1.5% vs 3% for BTC)
-        if (cpr.signal !== 'NEUTRAL' && Math.abs(cpr.distToPP) < 0.015) { score++; details.push('CPR PP aligned'); }
+        if (cpr.signal === 'BULLISH' && Math.abs(cpr.distToPP) < 0.015) { bullScore++; details.push('CPR PP ↑'); }
+        else if (cpr.signal === 'BEARISH' && Math.abs(cpr.distToPP) < 0.015) { bearScore++; details.push('CPR PP ↓'); }
 
         // Factor 5: VWAP Alignment
-        if (vwap.signal !== 'NEUTRAL') { score++; details.push('VWAP aligned'); }
+        if (vwap.signal === 'BULLISH') { bullScore++; details.push('VWAP ↑'); }
+        else if (vwap.signal === 'BEARISH') { bearScore++; details.push('VWAP ↓'); }
 
         // Factor 6: Liquidity Sweep / Wyckoff
-        if (liquidity.signal !== 'NEUTRAL') {
-            score++;
-            details.push(liquidity.isWyckoffConfirmed ? 'Wyckoff confirmed' : 'Liquidity sweep');
-            if (liquidity.isWyckoffConfirmed) { score++; details.push('Wyckoff bonus'); }
+        if (liquidity.signal === 'BULLISH') {
+            bullScore++;
+            details.push(liquidity.isWyckoffConfirmed ? 'Wyckoff ↑' : 'Liq sweep ↑');
+            if (liquidity.isWyckoffConfirmed) { bullScore++; details.push('Wyckoff bonus'); }
+        } else if (liquidity.signal === 'BEARISH') {
+            bearScore++;
+            details.push(liquidity.isWyckoffConfirmed ? 'Wyckoff ↓' : 'Liq sweep ↓');
+            if (liquidity.isWyckoffConfirmed) { bearScore++; details.push('Wyckoff bonus'); }
         }
 
         // Factor 7: OTE Zone (Fibonacci 62-79%)
-        if (ote.signal !== 'NEUTRAL') { score++; details.push('In OTE zone'); }
+        if (ote.signal === 'BULLISH') { bullScore++; details.push('OTE bull'); }
+        else if (ote.signal === 'BEARISH') { bearScore++; details.push('OTE bear'); }
 
         // Factor 8: Order Block / FVG
-        if (obfvg.signal !== 'NEUTRAL' && obfvg.strength > 2) { score++; details.push('OB/FVG detected'); }
+        if (obfvg.signal === 'BULLISH' && obfvg.strength > 2) { bullScore++; details.push('OB/FVG ↑'); }
+        else if (obfvg.signal === 'BEARISH' && obfvg.strength > 2) { bearScore++; details.push('OB/FVG ↓'); }
 
         // Factor 9: CHoCH / BOS Structure Break
-        if (structure.signal !== 'NEUTRAL') { score++; details.push('Structure break'); }
+        if (structure.signal === 'BULLISH') { bullScore++; details.push('BOS/CHoCH ↑'); }
+        else if (structure.signal === 'BEARISH') { bearScore++; details.push('BOS/CHoCH ↓'); }
 
-        // Factor 10: Volume Confirmation
-        if (recentVol > prevVol * 1.1) { score++; details.push('Volume confirmation'); }
+        // Factor 10: Volume Confirmation (direction-neutral)
+        if (recentVol > prevVol * 1.1) {
+            // Volume confirms the dominant direction
+            if (bullScore > bearScore) { bullScore++; details.push('Vol confirms ↑'); }
+            else if (bearScore > bullScore) { bearScore++; details.push('Vol confirms ↓'); }
+        }
+
+        // The score is the MAX of the two directional scores — conflicting signals DON'T stack
+        const score = Math.min(Math.max(bullScore, bearScore), this.MAX_SCORE);
+        const direction = bullScore >= bearScore ? 'BULLISH' : 'BEARISH';
 
         return {
-            score: Math.min(score, this.MAX_SCORE),
+            score,
             threshold: this.CONFLUENCE_THRESHOLD,
             details: details.join(', '),
+            direction, // NEW: tells analyze() which way confluence is pointing
+            bullScore,
+            bearScore,
             indicators: { rsi, macd, cpr, vwap, liquidity, ote, obfvg, structure, ema50Val }
         };
     }
@@ -313,7 +334,7 @@ class UnifiedStrategy {
         }
 
         const confluence = this.calculateConfluenceScore(priceData);
-        const { score, indicators } = confluence;
+        const { score, indicators, direction } = confluence;
 
         let signal = 'NEUTRAL';
 
@@ -328,8 +349,9 @@ class UnifiedStrategy {
             const bullish = ema9Val > ema21Val && currentPrice > indicators.ema50Val;
             const bearish = ema9Val < ema21Val && currentPrice < indicators.ema50Val;
 
-            if (bullish) signal = 'BUY';
-            else if (bearish) signal = 'SELL';
+            // FIXED: Only take a trade if EMA direction AGREES with confluence direction
+            if (bullish && direction === 'BULLISH') signal = 'BUY';
+            else if (bearish && direction === 'BEARISH') signal = 'SELL';
         }
 
         // Calculate risk parameters

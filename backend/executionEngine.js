@@ -1,6 +1,7 @@
 const sqlite3 = require('sqlite3').verbose();
 const TelegramBot = require('telegram-bot-api');
 const dotenv = require('dotenv');
+const UnifiedStrategy = require('./unifiedStrategy');
 
 dotenv.config();
 
@@ -8,6 +9,7 @@ class ExecutionEngine {
     constructor(db) {
         this.db = db;
         this.FIXED_QUANTITY = 0.01; // Fixed lot — never changes
+        this.strategy = new UnifiedStrategy(); // Single source of truth for trailing stop + exit logic
 
         // Initialize Telegram bot (placeholder)
         this.bot = null;
@@ -37,6 +39,9 @@ class ExecutionEngine {
                     rows.forEach(row => {
                         this.activeTrades.set(row.id, {
                             ...row,
+                            entryPrice: row.entry_price, // alias for UnifiedStrategy compatibility
+                            originalSl: row.original_sl || row.sl,
+                            atr: row.atr || 15, // fallback ATR for gold 6H
                             timestamp: new Date(row.timestamp)
                         });
                     });
@@ -73,7 +78,9 @@ class ExecutionEngine {
 
         // Use dynamic SL/TP from the signal
         let sl = signal.sl || (action === 'BUY' ? entryPrice - 10 : entryPrice + 10);
+        const originalSl = sl;
         const tp1 = signal.tp1 || (action === 'BUY' ? entryPrice + 30 : entryPrice - 30);
+        const atr = signal.atr || 15; // ATR from analysis — critical for trailing stop
         const score = signal.score || 0;
         const notes = signal.notes || '';
 
@@ -98,9 +105,9 @@ class ExecutionEngine {
         return new Promise((resolve) => {
             const self = this;
             this.db.run(
-                `INSERT INTO trades (userId, action, entry_price, quantity, timestamp, status, sl, tp1, score, notes, trade_type) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paper')`,
-                [userId, action, entryPrice, tradeQuantity, timestamp.toISOString(), 'OPEN', sl, tp1, score, notes],
+                `INSERT INTO trades (userId, action, entry_price, quantity, timestamp, status, sl, tp1, score, notes, trade_type, atr, original_sl) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paper', ?, ?)`,
+                [userId, action, entryPrice, tradeQuantity, timestamp.toISOString(), 'OPEN', sl, tp1, score, notes, atr, originalSl],
                 function (err) {
                     if (err) {
                         console.error('Error logging trade to database:', err);
@@ -114,15 +121,16 @@ class ExecutionEngine {
                         userId,
                         action,
                         entry_price: entryPrice,
+                        entryPrice: entryPrice, // alias for UnifiedStrategy compatibility
                         quantity: tradeQuantity,
                         timestamp,
                         status: 'OPEN',
-                        sl, tp1, score, notes
+                        sl, originalSl, tp1, atr, score, notes
                     };
 
                     self.activeTrades.set(tradeId, trade);
 
-                    self._sendAlert(`[${userId}] Gold trade executed: ${action} ${tradeQuantity} oz XAU at $${entryPrice.toFixed(2)}`);
+                    self._sendAlert(`[${userId}] Gold trade executed: ${action} ${tradeQuantity} oz XAU at $${entryPrice.toFixed(2)} | SL: $${sl.toFixed(2)} | TP1: $${tp1.toFixed(2)} | ATR: $${atr.toFixed(2)}`);
 
                     resolve({
                         success: true,
@@ -135,67 +143,44 @@ class ExecutionEngine {
     }
 
     /**
-     * Monitor active trades for SL/TP hits
+     * Monitor active trades for SL/TP hits.
+     * UNIFIED: Delegates to UnifiedStrategy.checkTradeExit() — same logic as backtest.
      * @param {number} currentPrice - Current market price
      */
     monitorTrades(currentPrice) {
         for (const [tradeId, trade] of this.activeTrades.entries()) {
             if (trade.status !== 'OPEN') continue;
 
-            let exitPrice = null;
-            let exitReason = '';
+            // Build a synthetic candle from the tick price for UnifiedStrategy compatibility
+            const entryPrice = trade.entry_price || trade.entryPrice;
+            const currentCandle = {
+                open: currentPrice,
+                high: currentPrice,
+                low: currentPrice,
+                close: currentPrice,
+                price: currentPrice
+            };
 
-            // === TRAILING STOP LOSS LOGIC (tuned for gold) ===
-            const CONTRACT_SIZE = 100;
-            const positionSize = trade.quantity * CONTRACT_SIZE;
+            // Normalize trade object for UnifiedStrategy (it expects entryPrice, not entry_price)
+            const strategyTrade = {
+                action: trade.action,
+                entryPrice: entryPrice,
+                quantity: trade.quantity,
+                sl: trade.sl,
+                originalSl: trade.originalSl || trade.original_sl || trade.sl,
+                tp1: trade.tp1,
+                tp2: trade.tp2,
+                atr: trade.atr || 15 // Fallback ATR for gold 6H
+            };
 
-            if (trade.action === 'BUY') {
-                const unrealizedPnl = (currentPrice - trade.entry_price) * positionSize;
-                
-                // Trail SL as profit grows (gold thresholds: 2R, 3.5R, 5R)
-                if (unrealizedPnl > 0.15 * 5) {
-                    const trailed = trade.entry_price + (currentPrice - trade.entry_price) * 0.8;
-                    trade.sl = Math.max(trade.sl, trailed);
-                } else if (unrealizedPnl > 0.15 * 3.5) {
-                    const trailed = trade.entry_price + (currentPrice - trade.entry_price) * 0.6;
-                    trade.sl = Math.max(trade.sl, trailed);
-                } else if (unrealizedPnl > 0.15 * 2) {
-                    const breakevenPlus = trade.entry_price + (currentPrice - trade.entry_price) * 0.1;
-                    trade.sl = Math.max(trade.sl, breakevenPlus);
-                }
+            // Use the SAME trailing stop + exit logic as the backtest
+            const exitResult = this.strategy.checkTradeExit(strategyTrade, currentCandle);
 
-                if (currentPrice <= trade.sl) {
-                    exitPrice = trade.sl;
-                    exitReason = trade.sl >= trade.entry_price ? 'Trailing SL (Breakeven+)' : 'Stop Loss';
-                } else if (currentPrice >= trade.tp1) {
-                    exitPrice = currentPrice;
-                    exitReason = 'Take Profit (Max)';
-                }
-            } else if (trade.action === 'SELL') {
-                const unrealizedPnl = (trade.entry_price - currentPrice) * positionSize;
-                
-                if (unrealizedPnl > 0.15 * 5) {
-                    const trailed = trade.entry_price - (trade.entry_price - currentPrice) * 0.8;
-                    trade.sl = Math.min(trade.sl, trailed);
-                } else if (unrealizedPnl > 0.15 * 3.5) {
-                    const trailed = trade.entry_price - (trade.entry_price - currentPrice) * 0.6;
-                    trade.sl = Math.min(trade.sl, trailed);
-                } else if (unrealizedPnl > 0.15 * 2) {
-                    const breakevenPlus = trade.entry_price - (trade.entry_price - currentPrice) * 0.1;
-                    trade.sl = Math.min(trade.sl, breakevenPlus);
-                }
+            // Sync the (possibly trailed) SL back to the live trade
+            trade.sl = strategyTrade.sl;
 
-                if (currentPrice >= trade.sl) {
-                    exitPrice = trade.sl;
-                    exitReason = trade.sl <= trade.entry_price ? 'Trailing SL (Breakeven+)' : 'Stop Loss';
-                } else if (currentPrice <= trade.tp1) {
-                    exitPrice = currentPrice;
-                    exitReason = 'Take Profit (Max)';
-                }
-            }
-
-            if (exitPrice !== null) {
-                this._closeTrade(tradeId, exitPrice, exitReason);
+            if (exitResult.closed) {
+                this._closeTrade(tradeId, exitResult.exitPrice, exitResult.exitReason);
             }
         }
     }
