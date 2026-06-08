@@ -30,18 +30,10 @@ class TradingBot {
     }
 
     /**
-     * Initialize price data with some starting gold prices
+     * Initialize price data — starts empty, populated by first successful API call
      */
     _initializePriceData() {
-        const basePrice = 2400;
-        for (let i = 0; i < 50; i++) {
-            const price = basePrice + (Math.random() - 0.5) * 40; // Random walk around $2400
-            this.priceData.push({
-                timestamp: new Date(Date.now() - (50 - i) * 60000),
-                price: price,
-                volume: Math.random() * 100
-            });
-        }
+        // No seed data — priceData is populated by _analyzeAndTrade() with real Bybit candles
     }
 
     start() {
@@ -463,30 +455,72 @@ class TradingBot {
     }
 
     /**
-     * Helper to fetch data from Bybit, with automatic proxy fallback for blocked cloud IPs (e.g. Railway)
+     * Helper to fetch data from Bybit, with automatic fallback across
+     * multiple Bybit API mirrors and CORS proxies for blocked cloud IPs (e.g. Railway).
      */
     async _fetchBybitData(url) {
-        try {
-            const response = await fetch(url, { headers: { 'Accept': 'application/json' }, timeout: 8000 });
-            if (response.ok) {
-                const json = await response.json();
-                if (json && json.retCode === 0) return json;
-            }
-            throw new Error(`Direct fetch failed with status ${response.status}`);
-        } catch (directErr) {
-            console.log(`Direct Bybit fetch failed (${directErr.message}), falling back to proxy...`);
+        // Bybit has multiple official API domains — try them all
+        const bybitDomains = [
+            'api.bybit.com',
+            'api.bytick.com',
+            'api.bybit.nl'
+        ];
+
+        const originalDomain = new URL(url).hostname;
+        const errors = [];
+
+        // Phase 1: Try each Bybit domain directly
+        for (const domain of bybitDomains) {
             try {
-                const proxyUrl = `https://api.codetabs.com/v1/proxy/?quest=${url.replace(/&/g, '%26')}`;
-                const proxyResponse = await fetch(proxyUrl, { headers: { 'Accept': 'application/json' }, timeout: 12000 });
-                if (proxyResponse.ok) {
-                    const proxyJson = await proxyResponse.json();
-                    if (proxyJson && proxyJson.retCode === 0) return proxyJson;
+                const domainUrl = url.replace(originalDomain, domain);
+                const response = await fetch(domainUrl, {
+                    headers: { 'Accept': 'application/json', 'User-Agent': 'GoldForge/1.0' },
+                    timeout: 10000
+                });
+                if (response.ok) {
+                    const json = await response.json();
+                    if (json && json.retCode === 0) {
+                        if (domain !== originalDomain) {
+                            console.log(`Bybit fetch succeeded via mirror: ${domain}`);
+                        }
+                        return json;
+                    }
                 }
-                throw new Error(`Proxy fetch failed with status ${proxyResponse.status}`);
-            } catch (proxyErr) {
-                throw new Error(`All fetch methods failed. Last error: ${proxyErr.message}`);
+                errors.push(`${domain}: status ${response.status}`);
+            } catch (err) {
+                errors.push(`${domain}: ${err.message}`);
             }
         }
+
+        // Phase 2: Try CORS proxies as last resort
+        const proxyTemplates = [
+            (u) => `https://api.codetabs.com/v1/proxy/?quest=${u.replace(/&/g, '%26')}`,
+            (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`
+        ];
+
+        for (const makeProxy of proxyTemplates) {
+            try {
+                const proxyUrl = makeProxy(url);
+                const response = await fetch(proxyUrl, {
+                    headers: { 'Accept': 'application/json' },
+                    timeout: 15000
+                });
+                if (response.ok) {
+                    const text = await response.text();
+                    if (text && text.trim().startsWith('{')) {
+                        const json = JSON.parse(text);
+                        if (json && json.retCode === 0) {
+                            console.log('Bybit fetch succeeded via CORS proxy');
+                            return json;
+                        }
+                    }
+                }
+            } catch (err) {
+                errors.push(`proxy: ${err.message}`);
+            }
+        }
+
+        throw new Error(`All Bybit fetch methods failed: ${errors.join(' | ')}`);
     }
 
 
