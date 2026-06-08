@@ -5,18 +5,70 @@ const Backtester = () => {
     const [results, setResults] = useState(null);
     const [isRunning, setIsRunning] = useState(false);
     const [error, setError] = useState(null);
+    const [progress, setProgress] = useState('');
+
+    /**
+     * Fetch candle data from Bybit directly in the browser.
+     * The user's browser isn't IP-blocked like Railway's servers.
+     */
+    const fetchCandlesFromBrowser = async () => {
+        const symbol = 'XAUUSDT';
+        const interval = '360'; // 6h candles
+        const totalLimit = 500;
+
+        // Anchor to start of current UTC day for reproducibility
+        const now = new Date();
+        const anchoredEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+        let end = anchoredEnd.getTime();
+        let allCandles = [];
+        let remaining = totalLimit;
+
+        while (remaining > 0) {
+            const chunkLimit = Math.min(remaining, 200);
+            setProgress(`Fetching candles... ${allCandles.length}/${totalLimit}`);
+
+            const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${chunkLimit}&end=${end}`;
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`Bybit API returned ${response.status}`);
+
+            const json = await response.json();
+            if (!json || json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) break;
+
+            allCandles = allCandles.concat(json.result.list);
+
+            const lastTimestamp = parseInt(json.result.list[json.result.list.length - 1][0]);
+            end = lastTimestamp;
+            remaining -= chunkLimit;
+
+            await new Promise(resolve => setTimeout(resolve, 200));
+        }
+
+        if (allCandles.length === 0) {
+            throw new Error('No candle data returned from Bybit');
+        }
+
+        setProgress(`Processing ${allCandles.length} candles...`);
+        return allCandles;
+    };
 
     const runBacktest = async () => {
         setIsRunning(true);
         setError(null);
+        setProgress('Fetching historical data from Bybit...');
         try {
+            // Step 1: Fetch candle data from browser (bypasses Railway IP block)
+            const candles = await fetchCandlesFromBrowser();
+
+            // Step 2: Send candle data to backend for strategy processing
+            setProgress('Running backtest simulation...');
             const response = await fetch(`${API_BASE_URL}/backtest`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     days: 90,
                     strategy: 'confluence_scoring',
-                    userId: userId
+                    userId: userId,
+                    candles: candles
                 })
             });
 
@@ -33,6 +85,7 @@ const Backtester = () => {
             setResults(null);
         } finally {
             setIsRunning(false);
+            setProgress('');
         }
     };
 
@@ -107,7 +160,7 @@ const Backtester = () => {
                     disabled={isRunning}
                     className={isRunning ? 'running' : ''}
                 >
-                    {isRunning ? 'Running...' : 'Run 90-Day Gold Backtest'}
+                    {isRunning ? (progress || 'Running...') : 'Run 90-Day Gold Backtest'}
                 </button>
             </div>
 

@@ -38,6 +38,30 @@ const BotStatus = () => {
         return () => clearInterval(interval);
     }, []);
 
+    // Push Bybit candle data from browser to backend every 60s
+    // This bypasses Bybit REST API being blocked on Railway's server IPs
+    useEffect(() => {
+        const pushCandles = async () => {
+            try {
+                const url = 'https://api.bybit.com/v5/market/kline?category=linear&symbol=XAUUSDT&interval=360&limit=200';
+                const response = await fetch(url);
+                if (!response.ok) return;
+                const json = await response.json();
+                if (!json || json.retCode !== 0 || !json.result?.list) return;
+
+                await axios.post(`${API_BASE_URL}/bot/candles`, {
+                    candles: json.result.list
+                });
+            } catch (err) {
+                // Silent — the bot's own fetch may work on some hosts
+            }
+        };
+
+        pushCandles();
+        const interval = setInterval(pushCandles, 60000);
+        return () => clearInterval(interval);
+    }, []);
+
     if (loading || !status) return <div className="bot-status-container">Loading bot status...</div>;
 
     const { bot, todayTrade } = status;

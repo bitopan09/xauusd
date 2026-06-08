@@ -75,38 +75,45 @@ class TradingBot {
 
     /**
      * Main analysis and trading loop
-     * Fetches 6H candles from Bybit for XAUUSDT and runs confluence scoring
+     * Fetches 6H candles from Bybit for XAUUSDT and runs confluence scoring.
+     * If priceData was pre-populated (e.g. by /api/bot/candles), skip the fetch.
      */
     async _analyzeAndTrade() {
         try {
-            // Fetch live 6H candles from Bybit for XAU/USD
-            const symbol = 'XAUUSDT';
-            const interval = '360'; // 6h candles
-            const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=200`;
-            
-            let json;
-            try {
-                json = await this._fetchBybitData(url);
-            } catch (err) {
-                console.error('Failed to fetch live XAU candles (direct and proxy):', err.message);
-                return;
+            // Skip fetch if priceData was already populated with real OHLCV candles
+            // (e.g. by the frontend pushing via /api/bot/candles)
+            const hasRealCandles = this.priceData.length >= 50 && this.priceData[0].open !== undefined;
+
+            if (!hasRealCandles) {
+                // Fetch live 6H candles from Bybit for XAU/USD
+                const symbol = 'XAUUSDT';
+                const interval = '360'; // 6h candles
+                const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=200`;
+                
+                let json;
+                try {
+                    json = await this._fetchBybitData(url);
+                } catch (err) {
+                    console.error('Failed to fetch live XAU candles:', err.message);
+                    return;
+                }
+                
+                if (!json || json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) {
+                    console.error('Invalid Bybit response for XAU candles');
+                    return;
+                }
+                
+                // Format for analysis (Bybit returns newest first, reverse to chronological)
+                this.priceData = json.result.list.reverse().map(k => ({
+                    timestamp: new Date(parseInt(k[0])),
+                    open: parseFloat(k[1]),
+                    high: parseFloat(k[2]),
+                    low: parseFloat(k[3]),
+                    close: parseFloat(k[4]),
+                    volume: parseFloat(k[5]),
+                    price: parseFloat(k[4])
+                }));
             }
-            
-            if (!json || json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) {
-                console.error('Invalid Bybit response for XAU candles');
-                return;
-            }
-            
-            // Format for analysis (Bybit returns newest first, reverse to chronological)
-            this.priceData = json.result.list.reverse().map(k => ({
-                timestamp: new Date(parseInt(k[0])),
-                open: parseFloat(k[1]),
-                high: parseFloat(k[2]),
-                low: parseFloat(k[3]),
-                close: parseFloat(k[4]),
-                volume: parseFloat(k[5]),
-                price: parseFloat(k[4])
-            }));
 
             // Perform analysis and make decision
             const decision = await this.decisionEngine.makeDecision(this.priceData);
@@ -189,8 +196,11 @@ class TradingBot {
 
     /**
      * Run backtest using real-time historical gold data from Bybit
+     * @param {number} days - Lookback period
+     * @param {string} strategy - Strategy name
+     * @param {Array|null} clientCandles - Raw candle arrays from frontend (bypasses server-side fetch)
      */
-    async runBacktest(days = 90, strategy = 'default') {
+    async runBacktest(days = 90, strategy = 'default', clientCandles = null) {
         console.log(`Starting XAU/USD backtest for ${days} days...`);
         
         try {
@@ -204,8 +214,44 @@ class TradingBot {
             const dateKey = anchoredEnd.toISOString().split('T')[0]; // e.g. "2026-06-08"
             const cacheFile = path.join(__dirname, `xau_backtest_cache_${dateKey}.json`);
 
-            // Try to load from today's cache first
-            if (fs.existsSync(cacheFile)) {
+            // Priority 1: Use client-provided candles (fetched by user's browser — not IP-blocked)
+            if (clientCandles && Array.isArray(clientCandles) && clientCandles.length > 0) {
+                console.log(`Using ${clientCandles.length} candles provided by client browser`);
+                // Client sends raw Bybit format: [[timestamp, open, high, low, close, volume, turnover], ...]
+                // Reverse to chronological (Bybit returns newest-first)
+                const sorted = [...clientCandles].sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
+                historicalData = sorted.map(k => ({
+                    timestamp: new Date(parseInt(k[0])),
+                    open: parseFloat(k[1]),
+                    high: parseFloat(k[2]),
+                    low: parseFloat(k[3]),
+                    close: parseFloat(k[4]),
+                    volume: parseFloat(k[5]),
+                    price: parseFloat(k[4])
+                }));
+                dataSource = 'client_browser';
+                console.log(`✓ Parsed ${historicalData.length} client candles`);
+
+                // Cache client data for subsequent server-side runs
+                try {
+                    const files = fs.readdirSync(__dirname).filter(f => f.startsWith('xau_backtest_cache_') && f.endsWith('.json'));
+                    files.forEach(f => {
+                        if (!f.includes(dateKey)) {
+                            try { fs.unlinkSync(path.join(__dirname, f)); } catch (e) {}
+                        }
+                    });
+                    fs.writeFileSync(cacheFile, JSON.stringify(historicalData.map(d => ({
+                        ...d,
+                        timestamp: d.timestamp.toISOString()
+                    }))));
+                    console.log(`✓ Cached client data to ${cacheFile}`);
+                } catch (writeErr) {
+                    console.warn('Could not write cache file:', writeErr.message);
+                }
+            }
+
+            // Priority 2: Try to load from today's cache
+            if (!historicalData && fs.existsSync(cacheFile)) {
                 try {
                     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
                     if (cached && cached.length > 0) {
@@ -221,7 +267,7 @@ class TradingBot {
                 }
             }
 
-            // If no cache, fetch from Bybit
+            // Priority 3: Fetch from Bybit server-side (works locally, may 403 on Railway)
             if (!historicalData) {
                 console.log('Fetching XAU/USD candles from Bybit API...');
                 const symbol = 'XAUUSDT';
@@ -250,7 +296,7 @@ class TradingBot {
                 }
 
                 if (allCandles.length === 0) {
-                    throw new Error('Failed to fetch historical data from Bybit. No candles returned. Please try again later.');
+                    throw new Error('Failed to fetch historical data. Bybit may be blocked on this server. Please try again — the browser will fetch the data directly.');
                 }
                 
                 historicalData = allCandles.reverse().map(k => ({
@@ -267,7 +313,6 @@ class TradingBot {
 
                 // Cache to file for reproducibility within the same day
                 try {
-                    // Clean up old cache files (keep only today's)
                     const files = fs.readdirSync(__dirname).filter(f => f.startsWith('xau_backtest_cache_') && f.endsWith('.json'));
                     files.forEach(f => {
                         if (!f.includes(dateKey)) {

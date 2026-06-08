@@ -18,7 +18,7 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 // Serve static files from the React app
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
@@ -314,12 +314,49 @@ app.get('/api/bot/status', async (req, res) => {
     }
 });
 
+// Frontend pushes Bybit candle data so the live bot can analyze
+// even when Bybit REST API is blocked on Railway
+app.post('/api/bot/candles', async (req, res) => {
+    try {
+        const { candles } = req.body;
+        if (!candles || !Array.isArray(candles) || candles.length === 0) {
+            return res.status(400).json({ error: 'No candle data provided' });
+        }
+
+        // Parse raw Bybit candle format to the structure the bot expects
+        const sorted = [...candles].sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
+        const priceData = sorted.map(k => ({
+            timestamp: new Date(parseInt(k[0])),
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+            volume: parseFloat(k[5]),
+            price: parseFloat(k[4])
+        }));
+
+        // Feed candle data to the bot for analysis
+        tradingBot.priceData = priceData;
+        await tradingBot._analyzeAndTrade();
+
+        const status = tradingBot.getStatus();
+        res.json({
+            success: true,
+            message: `Processed ${priceData.length} candles`,
+            score: status.currentScore,
+            signal: status.currentSignal
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Backtest
 app.post('/api/backtest', async (req, res) => {
     try {
-        const { days, strategy, userId } = req.body;
+        const { days, strategy, userId, candles } = req.body;
         console.log(`Running XAU/USD backtest for ${days} days using ${strategy} strategy...`);
-        const results = await tradingBot.runBacktest(days, strategy);
+        const results = await tradingBot.runBacktest(days, strategy, candles || null);
         res.json(results);
     } catch (error) {
         res.status(500).json({ error: error.message });
