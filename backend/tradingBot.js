@@ -3,6 +3,8 @@ const DecisionEngine = require('./decisionEngine');
 const ExecutionEngine = require('./executionEngine');
 const emailService = require('./emailService');
 const fetch = require('node-fetch');
+const fs = require('fs');
+const path = require('path');
 
 class TradingBot {
     constructor(db) {
@@ -201,15 +203,40 @@ class TradingBot {
         
         try {
             let historicalData = null;
-            
-            // Bybit XAUUSDT linear perpetual
-            try {
+            let dataSource = 'bybit_live';
+
+            // Anchor end time to start of current UTC day so all runs within
+            // the same day fetch the exact same candle window.
+            const now = new Date();
+            const anchoredEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+            const dateKey = anchoredEnd.toISOString().split('T')[0]; // e.g. "2026-06-08"
+            const cacheFile = path.join(__dirname, `xau_backtest_cache_${dateKey}.json`);
+
+            // Try to load from today's cache first
+            if (fs.existsSync(cacheFile)) {
+                try {
+                    const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+                    if (cached && cached.length > 0) {
+                        historicalData = cached.map(k => ({
+                            ...k,
+                            timestamp: new Date(k.timestamp)
+                        }));
+                        dataSource = 'cache';
+                        console.log(`✓ Loaded ${historicalData.length} cached XAU candles for ${dateKey}`);
+                    }
+                } catch (cacheErr) {
+                    console.warn('Cache read failed, will fetch fresh:', cacheErr.message);
+                }
+            }
+
+            // If no cache, fetch from Bybit
+            if (!historicalData) {
                 console.log('Fetching XAU/USD candles from Bybit API...');
                 const symbol = 'XAUUSDT';
                 const interval = '360'; // 6h candles
                 const totalLimit = 500;
                 
-                let end = Date.now();
+                let end = anchoredEnd.getTime();
                 let allCandles = [];
                 let remaining = totalLimit;
                 
@@ -229,6 +256,10 @@ class TradingBot {
                     
                     await new Promise(resolve => setTimeout(resolve, 200));
                 }
+
+                if (allCandles.length === 0) {
+                    throw new Error('Failed to fetch historical data from Bybit. No candles returned. Please try again later.');
+                }
                 
                 historicalData = allCandles.reverse().map(k => ({
                     timestamp: new Date(parseInt(k[0])),
@@ -241,12 +272,30 @@ class TradingBot {
                 }));
                 
                 console.log(`✓ Fetched ${historicalData.length} XAU candles from Bybit`);
-                
-            } catch (bybitError) {
-                console.warn('Bybit API failed, using synthetic gold data...', bybitError.message);
-                historicalData = this._generateSyntheticData(500);
-                console.log(`✓ Generated ${historicalData.length} synthetic gold candles`);
+
+                // Cache to file for reproducibility within the same day
+                try {
+                    // Clean up old cache files (keep only today's)
+                    const files = fs.readdirSync(__dirname).filter(f => f.startsWith('xau_backtest_cache_') && f.endsWith('.json'));
+                    files.forEach(f => {
+                        if (!f.includes(dateKey)) {
+                            try { fs.unlinkSync(path.join(__dirname, f)); } catch (e) {}
+                        }
+                    });
+                    fs.writeFileSync(cacheFile, JSON.stringify(historicalData.map(d => ({
+                        ...d,
+                        timestamp: d.timestamp.toISOString()
+                    }))));
+                    console.log(`✓ Cached data to ${cacheFile}`);
+                } catch (writeErr) {
+                    console.warn('Could not write cache file:', writeErr.message);
+                }
             }
+
+            // Build data hash for verification (first candle ts + last candle ts + count)
+            const firstTs = historicalData[0].timestamp.toISOString();
+            const lastTs = historicalData[historicalData.length - 1].timestamp.toISOString();
+            const dataHash = `${firstTs.slice(0,10)}_${lastTs.slice(0,10)}_${historicalData.length}`;
 
             // Initialize simulation
             const trades = [];
@@ -361,14 +410,41 @@ class TradingBot {
                 if (dd > maxDD) maxDD = dd;
             });
 
+            // Compute real Sharpe Ratio from equity curve returns
+            let sharpeRatio = 0;
+            if (equityCurve.length > 2) {
+                const returns = [];
+                for (let i = 1; i < equityCurve.length; i++) {
+                    if (equityCurve[i - 1].equity !== 0) {
+                        returns.push((equityCurve[i].equity - equityCurve[i - 1].equity) / equityCurve[i - 1].equity);
+                    }
+                }
+                if (returns.length > 1) {
+                    const meanReturn = returns.reduce((s, r) => s + r, 0) / returns.length;
+                    const variance = returns.reduce((s, r) => s + Math.pow(r - meanReturn, 2), 0) / (returns.length - 1);
+                    const stdDev = Math.sqrt(variance);
+                    // Annualize: 6h candles, ~4 per day, equity sampled every 10 candles ≈ 2.5 days
+                    // ~146 samples/year, so annualization factor = sqrt(146)
+                    const annualizationFactor = Math.sqrt(365 / Math.max(days / equityCurve.length, 1));
+                    sharpeRatio = stdDev > 0 ? (meanReturn / stdDev) * annualizationFactor : 0;
+                }
+            }
+
             return {
                 totalTrades: completedTrades.length,
                 winRate,
                 profitFactor: Math.min(profitFactor, 10),
                 maxDrawdown: maxDD,
-                sharpeRatio: ((equity - initialEquity) / initialEquity) > 0 ? 1.8 : 0.5,
+                sharpeRatio: parseFloat(sharpeRatio.toFixed(2)),
                 totalReturn: (equity - initialEquity) / initialEquity,
                 equityCurve,
+                dataInfo: {
+                    hash: dataHash,
+                    source: dataSource,
+                    candleCount: historicalData.length,
+                    dateRange: `${firstTs.slice(0,10)} to ${lastTs.slice(0,10)}`,
+                    anchoredTo: dateKey
+                },
                 trades: completedTrades.map(t => ({
                     id: t.id,
                     entryTimestamp: t.timestamp.toISOString(),
@@ -413,37 +489,7 @@ class TradingBot {
         }
     }
 
-    /**
-     * Generate synthetic gold price data for backtesting fallback
-     */
-    _generateSyntheticData(count = 500) {
-        const data = [];
-        let basePrice = 2350;
-        const now = new Date();
-        
-        for (let i = count; i > 0; i--) {
-            const timestamp = new Date(now.getTime() - i * 6 * 60 * 60 * 1000);
-            const trend = Math.sin(i / 100) * 0.001;
-            const randomChange = (Math.random() - 0.5) * 0.008;
-            basePrice = basePrice * (1 + trend + randomChange);
-            
-            const volatility = 0.005; // Gold has lower volatility than BTC
-            const open = basePrice;
-            const high = basePrice * (1 + Math.random() * volatility);
-            const low = basePrice * (1 - Math.random() * volatility);
-            const close = basePrice + (Math.random() - 0.5) * basePrice * 0.003;
-            
-            data.push({
-                timestamp, open,
-                high: Math.max(open, close, high),
-                low: Math.min(open, close, low),
-                close,
-                volume: 500 + Math.random() * 3000,
-                price: close
-            });
-        }
-        return data;
-    }
+
 }
 
 module.exports = TradingBot;

@@ -6,3 +6,4 @@ database.sqlite
 frontend/dist/
 .DS_Store
 *.log
+xau_backtest_cache_*.json

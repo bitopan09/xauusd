@@ -4,9 +4,11 @@ import { API_BASE_URL, userId } from '../services/api';
 const Backtester = () => {
     const [results, setResults] = useState(null);
     const [isRunning, setIsRunning] = useState(false);
+    const [error, setError] = useState(null);
 
     const runBacktest = async () => {
         setIsRunning(true);
+        setError(null);
         try {
             const response = await fetch(`${API_BASE_URL}/backtest`, {
                 method: 'POST',
@@ -19,27 +21,16 @@ const Backtester = () => {
             });
 
             if (!response.ok) {
-                throw new Error(`Backtest failed: ${response.status}`);
+                const errBody = await response.json().catch(() => ({}));
+                throw new Error(errBody.error || `Backtest failed with status ${response.status}`);
             }
 
             const data = await response.json();
             setResults(data);
         } catch (error) {
             console.error('Backtest failed:', error);
-            const mockResults = {
-                totalTrades: 38,
-                winRate: 0.63,
-                profitFactor: 1.6,
-                maxDrawdown: 0.12,
-                sharpeRatio: 1.1,
-                totalReturn: 0.28,
-                equityCurve: Array.from({ length: 30 }, (_, i) => ({
-                    day: i + 1,
-                    equity: 50 + (i * 0.6) + (Math.sin(i * 0.3) * 3)
-                })),
-                trades: []
-            };
-            setResults(mockResults);
+            setError(error.message || 'Backtest failed. Please try again.');
+            setResults(null);
         } finally {
             setIsRunning(false);
         }
@@ -56,7 +47,14 @@ const Backtester = () => {
         csv += `Max Drawdown,${(results.maxDrawdown * 100).toFixed(1)}%\n`;
         csv += `Sharpe Ratio,${results.sharpeRatio.toFixed(2)}\n`;
         csv += `Total Return,${(results.totalReturn * 100).toFixed(1)}%\n`;
-        csv += `Lot Size,Fixed 0.01\n\n`;
+        csv += `Lot Size,Fixed 0.01\n`;
+        if (results.dataInfo) {
+            csv += `Data Source,${results.dataInfo.source}\n`;
+            csv += `Candle Count,${results.dataInfo.candleCount}\n`;
+            csv += `Date Range,${results.dataInfo.dateRange}\n`;
+            csv += `Data Hash,${results.dataInfo.hash}\n`;
+        }
+        csv += '\n';
 
         csv += 'Equity Curve\n';
         csv += 'Day,Equity\n';
@@ -113,9 +111,32 @@ const Backtester = () => {
                 </button>
             </div>
 
+            {error && (
+                <div style={{ marginTop: '12px', padding: '10px 14px', background: 'rgba(239,68,68,0.12)', borderRadius: '8px', border: '1px solid rgba(239,68,68,0.3)', color: '#f87171', fontSize: '0.85rem' }}>
+                    <strong>⚠ Backtest Error:</strong> {error}
+                    <br />
+                    <button
+                        onClick={runBacktest}
+                        style={{ marginTop: '8px', padding: '4px 12px', background: 'rgba(239,68,68,0.2)', border: '1px solid rgba(239,68,68,0.4)', borderRadius: '6px', color: '#f87171', cursor: 'pointer', fontSize: '0.8rem' }}
+                    >
+                        Retry
+                    </button>
+                </div>
+            )}
+
             {results && (
                 <div className="backtester-results">
                     <h3>Backtest Results (90 days)</h3>
+
+                    {results.dataInfo && (
+                        <div style={{ marginBottom: '12px', padding: '6px 10px', background: 'rgba(34,197,94,0.08)', borderRadius: '6px', border: '1px solid rgba(34,197,94,0.2)', fontSize: '0.72rem', color: '#86efac', display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
+                            <span>📊 <strong>Source:</strong> {results.dataInfo.source === 'cache' ? 'Cached (Bybit)' : 'Bybit Live'}</span>
+                            <span>🕯 <strong>Candles:</strong> {results.dataInfo.candleCount}</span>
+                            <span>📅 <strong>Range:</strong> {results.dataInfo.dateRange}</span>
+                            <span>🔒 <strong>Hash:</strong> {results.dataInfo.hash}</span>
+                        </div>
+                    )}
+
                     <div className="results-grid">
                         <div className="result-item">
                             <h4>Total Trades</h4>
@@ -189,7 +210,7 @@ const Backtester = () => {
                 </div>
             )}
 
-            {!results && !isRunning && (
+            {!results && !isRunning && !error && (
                 <p>Click "Run 90-Day Gold Backtest" to see historical XAU/USD performance</p>
             )}
         </div>
