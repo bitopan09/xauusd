@@ -13,7 +13,7 @@ class AnalysisEngine {
             srDetector: { enabled: true, lookbackPeriods: 100 },
             obFvGScanner: { enabled: true, minObSize: 0.01 },
             chochBosDetector: { enabled: true, timeframe: '6H' },
-            confluenceScorer: { enabled: true, threshold: 7 }, // 7/10 for strict A+ quality
+            confluenceScorer: { enabled: true, threshold: this.strategy.CONFLUENCE_THRESHOLD },
             riskCalculator: { enabled: true, riskPerTrade: 0.05 }
         };
     }

@@ -78,7 +78,13 @@ const BotStatus = () => {
                             ({bot.currentSignal})
                         </span>
                     </p>
-                    
+                    <p><strong>Candle Data:</strong> <span className={bot.candleStale ? 'status-offline' : 'status-online'}>{bot.candleStale ? 'STALE' : 'FRESH'}</span>{bot.candleSource ? ` (${bot.candleSource})` : ''}</p>
+                    {bot.lastCandleTimestamp && (
+                        <p style={{ fontSize: '0.8rem', color: '#cbd5e0' }}>
+                            Last Candle: {formatTimeIST(bot.lastCandleTimestamp, 'date-time')} IST
+                        </p>
+                    )}
+
                     {bot.lastAnalysisTime && (
                         <p style={{ fontSize: '0.8rem', marginTop: '8px', color: '#cbd5e0' }}>
                             Last Analysis: {formatTimeIST(bot.lastAnalysisTime, 'date-time')} IST

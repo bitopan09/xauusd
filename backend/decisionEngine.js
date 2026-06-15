@@ -97,14 +97,27 @@ class DecisionEngine {
             };
         }
 
-        // Check if score meets minimum threshold (7/10 = A+ trade)
-        if (analysis.score < 7) {
+        // Check if score meets the configured strategy threshold
+        const threshold = analysis.details?.confluenceScorer?.threshold ?? 7;
+        if (analysis.score < threshold) {
             return {
                 action: 'SKIP',
-                reason: `Confluence score too low: ${analysis.score}/10`,
+                reason: `Confluence score too low: ${analysis.score}/${threshold}`,
                 details: {
                     score: analysis.score,
-                    threshold: 7,
+                    threshold,
+                    analysis: analysis.details
+                }
+            };
+        }
+
+        if (analysis.signal !== 'BUY' && analysis.signal !== 'SELL') {
+            return {
+                action: 'SKIP',
+                reason: 'Confluence passed, but EMA/direction filter did not confirm a trade signal',
+                details: {
+                    score: analysis.score,
+                    signal: analysis.signal,
                     analysis: analysis.details
                 }
             };

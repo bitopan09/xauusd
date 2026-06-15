@@ -7,11 +7,17 @@
 
 class UnifiedStrategy {
     constructor() {
-        this.CONFLUENCE_THRESHOLD = 7; // Minimum score to take a trade (A+ quality)
+        const numberFromEnv = (key, fallback) => {
+            const value = Number(process.env[key]);
+            return Number.isFinite(value) ? value : fallback;
+        };
+
+        this.CONFLUENCE_THRESHOLD = numberFromEnv('CONFLUENCE_THRESHOLD', 6); // Minimum score to take a trade
         this.MAX_SCORE = 10;
+        this.MIN_DIRECTIONAL_MARGIN = numberFromEnv('MIN_DIRECTIONAL_MARGIN', 1);
         this.FIXED_QUANTITY = 0.01;  // Fixed lot size — never changes
-        this.TP1_RR = 3;   // 1:3 Risk-Reward for TP1 (gold moves slower than BTC)
-        this.TP2_RR = 5;   // 1:5 Risk-Reward for TP2
+        this.TP1_RR = numberFromEnv('TP1_RR', 3);   // 1:3 Risk-Reward for TP1 by default
+        this.TP2_RR = numberFromEnv('TP2_RR', 5);   // 1:5 Risk-Reward for TP2 by default
     }
 
     /**
@@ -182,7 +188,7 @@ class UnifiedStrategy {
 
     detectOrderBlockFVG(priceData) {
         const recent = priceData.slice(-20);
-        let fvgCount = 0, obCount = 0;
+        let bullFvgCount = 0, bearFvgCount = 0, bullObCount = 0, bearObCount = 0;
 
         for (let i = 2; i < recent.length; i++) {
             const prev = recent[i - 2], next = recent[i];
@@ -191,22 +197,44 @@ class UnifiedStrategy {
             const prevLow = prev.low || prev.price;
             const nextHigh = next.high || next.price;
 
-            if (prevHigh < nextLow) fvgCount++;
-            if (prevLow > nextHigh) fvgCount++;
+            if (prevHigh < nextLow) bullFvgCount++;
+            if (prevLow > nextHigh) bearFvgCount++;
 
             const curr = recent[i - 1];
-            const bodySize = Math.abs((curr.open || curr.price) - (curr.close || curr.price));
+            const open = curr.open || curr.price;
+            const close = curr.close || curr.price;
+            const bodySize = Math.abs(open - close);
             const candleSize = (curr.high || curr.price) - (curr.low || curr.price);
-            if (candleSize > 0 && bodySize / candleSize > 0.6) obCount++;
+            if (candleSize > 0 && bodySize / candleSize > 0.6) {
+                if (close > open) bullObCount++;
+                else if (close < open) bearObCount++;
+            }
         }
 
-        const signal = fvgCount > 2 ? (obCount > 1 ? 'BULLISH' : 'BEARISH') : 'NEUTRAL';
-        return { signal, fvgCount, obCount, strength: Math.min((fvgCount + obCount) / 2, 10) };
+        const bullStrength = bullFvgCount + bullObCount;
+        const bearStrength = bearFvgCount + bearObCount;
+        const fvgCount = bullFvgCount + bearFvgCount;
+        const obCount = bullObCount + bearObCount;
+
+        let signal = 'NEUTRAL';
+        if (bullStrength > bearStrength && bullStrength > 2) signal = 'BULLISH';
+        else if (bearStrength > bullStrength && bearStrength > 2) signal = 'BEARISH';
+
+        return {
+            signal,
+            fvgCount,
+            obCount,
+            bullFvgCount,
+            bearFvgCount,
+            bullObCount,
+            bearObCount,
+            strength: Math.min(Math.max(bullStrength, bearStrength), 10)
+        };
     }
 
     detectStructureBreak(priceData) {
         const recent = priceData.slice(-10);
-        let bosCount = 0, chochCount = 0;
+        let bullBosCount = 0, bearBosCount = 0, bullChochCount = 0, bearChochCount = 0;
         const swingHighs = [], swingLows = [];
 
         for (let i = 2; i < recent.length - 2; i++) {
@@ -219,17 +247,30 @@ class UnifiedStrategy {
         }
 
         const currentPrice = priceData[priceData.length - 1].price;
-        if (swingHighs.length > 0 && currentPrice > Math.max(...swingHighs)) bosCount++;
-        if (swingLows.length > 0 && currentPrice < Math.min(...swingLows)) bosCount++;
+        if (swingHighs.length > 0 && currentPrice > Math.max(...swingHighs)) bullBosCount++;
+        if (swingLows.length > 0 && currentPrice < Math.min(...swingLows)) bearBosCount++;
         if (swingHighs.length >= 2 && swingLows.length >= 2) {
             const [prevSH, lastSH] = swingHighs.slice(-2);
             const [prevSL, lastSL] = swingLows.slice(-2);
-            if (lastSH > prevSH && lastSL > prevSL) chochCount++;
-            if (lastSH < prevSH && lastSL < prevSL) chochCount++;
+            if (lastSH > prevSH && lastSL > prevSL) bullChochCount++;
+            if (lastSH < prevSH && lastSL < prevSL) bearChochCount++;
         }
 
-        const signal = bosCount > 0 ? (chochCount > 0 ? 'BULLISH' : 'BEARISH') : 'NEUTRAL';
-        return { signal, bosCount, chochCount };
+        const bullStrength = bullBosCount + bullChochCount;
+        const bearStrength = bearBosCount + bearChochCount;
+        let signal = 'NEUTRAL';
+        if (bullStrength > bearStrength && bullStrength > 0) signal = 'BULLISH';
+        else if (bearStrength > bullStrength && bearStrength > 0) signal = 'BEARISH';
+
+        return {
+            signal,
+            bosCount: bullBosCount + bearBosCount,
+            chochCount: bullChochCount + bearChochCount,
+            bullBosCount,
+            bearBosCount,
+            bullChochCount,
+            bearChochCount
+        };
     }
 
     // ==================== 10-FACTOR CONFLUENCE SCORING ====================
@@ -265,8 +306,8 @@ class UnifiedStrategy {
         else if (currentPrice < ema50Val && currentPrice < prevPrice) { bearScore++; details.push('Trend ↓'); }
 
         // Factor 2: RSI Confirmation (tighter, direction-specific ranges)
-        if (rsi > 45 && rsi < 65) { bullScore++; details.push(`RSI: ${rsi.toFixed(1)} (bull zone)`); }
-        else if (rsi > 35 && rsi < 55) { bearScore++; details.push(`RSI: ${rsi.toFixed(1)} (bear zone)`); }
+        if (rsi > 50 && rsi < 65) { bullScore++; details.push(`RSI: ${rsi.toFixed(1)} (bull zone)`); }
+        else if (rsi > 35 && rsi < 50) { bearScore++; details.push(`RSI: ${rsi.toFixed(1)} (bear zone)`); }
 
         // Factor 3: MACD Confirmation (FIXED: requires meaningful magnitude, not just != 0)
         const macdThreshold = currentPrice * 0.0001; // 0.01% of price = ~$0.44 for gold at $4400
@@ -313,13 +354,18 @@ class UnifiedStrategy {
 
         // The score is the MAX of the two directional scores — conflicting signals DON'T stack
         const score = Math.min(Math.max(bullScore, bearScore), this.MAX_SCORE);
-        const direction = bullScore >= bearScore ? 'BULLISH' : 'BEARISH';
+        const scoreMargin = Math.abs(bullScore - bearScore);
+        let direction = 'NEUTRAL';
+        if (scoreMargin >= this.MIN_DIRECTIONAL_MARGIN) {
+            direction = bullScore > bearScore ? 'BULLISH' : 'BEARISH';
+        }
 
         return {
             score,
             threshold: this.CONFLUENCE_THRESHOLD,
             details: details.join(', '),
             direction, // NEW: tells analyze() which way confluence is pointing
+            scoreMargin,
             bullScore,
             bearScore,
             indicators: { rsi, macd, cpr, vwap, liquidity, ote, obfvg, structure, ema50Val }
@@ -415,8 +461,10 @@ class UnifiedStrategy {
         const CONTRACT_SIZE = 100;
         const positionSize = activeTrade.quantity * CONTRACT_SIZE;
 
-        const atr = activeTrade.atr || 15; // Gold ATR ~$15-30 on 6H
-        const riskUnit = positionSize * atr;
+        const initialStop = activeTrade.originalSl ?? activeTrade.original_sl ?? activeTrade.sl;
+        const riskDistance = Math.abs(activeTrade.entryPrice - initialStop);
+        const fallbackRiskDistance = activeTrade.atr || 15; // Gold ATR ~$15-30 on 6H
+        const riskUnit = positionSize * (riskDistance > 0 ? riskDistance : fallbackRiskDistance);
 
         if (activeTrade.action === 'BUY') {
             const unrealizedPnl = (currentCandle.close - activeTrade.entryPrice) * positionSize;

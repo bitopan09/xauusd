@@ -89,7 +89,7 @@ The bot uses a **10-factor institutional confluence scoring system**:
 | CHoCH/BOS | Change of Character / Break of Structure |
 | Volume | Volume confirmation |
 
-**Minimum score: 7/10** to take a trade (A+ quality only).
+**Default minimum score: 6/10** to take a trade. You can tune this with `CONFLUENCE_THRESHOLD` after backtesting.
 
 ## ⏰ Trading Session
 
@@ -140,7 +140,7 @@ xauusd/
 - **Daily Trade Limit:** 1 trade per session.
 - **Circuit Breaker:** Stops trading after 2 consecutive losses.
 - **Trailing Stop Loss:** 2R → breakeven, 3.5R → lock 60%, 5R → lock 80%.
-- **Risk-Reward:** TP1 at 1:3, TP2 at 1:5.
+- **Risk-Reward:** TP1 at 1:3, TP2 at 1:5 by default. Tune with `TP1_RR` and `TP2_RR`.
 
 ## 📧 Email Setup (Gmail)
 

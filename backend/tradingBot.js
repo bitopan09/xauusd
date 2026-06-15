@@ -24,6 +24,11 @@ class TradingBot {
         this.analysisInterval = null;
         this.priceData = [];
         this.maxDataPoints = 200;
+        this.maxCandleAgeMs = (Number(process.env.MAX_CANDLE_AGE_HOURS) || 8) * 60 * 60 * 1000;
+        this.lastCandleSource = null;
+        this.lastCandleUpdateTime = null;
+        this.lastCandleTimestamp = null;
+        this.candleStale = true;
         this.FIXED_QUANTITY = 0.01; // Fixed lot — never changes
 
         this._initializePriceData();
@@ -34,6 +39,27 @@ class TradingBot {
      */
     _initializePriceData() {
         // No seed data — priceData is populated by _analyzeAndTrade() with real Bybit candles
+    }
+
+    setPriceData(priceData, source = 'unknown') {
+        this.priceData = priceData;
+        this.lastCandleSource = source;
+        this.lastCandleUpdateTime = new Date().toISOString();
+        this.lastCandleTimestamp = priceData.length > 0
+            ? new Date(priceData[priceData.length - 1].timestamp).toISOString()
+            : null;
+        this.candleStale = !this.isCandleDataFresh(priceData);
+    }
+
+    isCandleDataFresh(priceData) {
+        if (!priceData || priceData.length === 0) return false;
+
+        const latest = new Date(priceData[priceData.length - 1].timestamp).getTime();
+        if (!Number.isFinite(latest)) return false;
+
+        const now = Date.now();
+        const maxFutureDriftMs = 5 * 60 * 1000;
+        return latest <= now + maxFutureDriftMs && now - latest <= this.maxCandleAgeMs;
     }
 
     start() {
@@ -80,11 +106,12 @@ class TradingBot {
      */
     async _analyzeAndTrade() {
         try {
-            // Skip fetch if priceData was already populated with real OHLCV candles
+            // Skip fetch only if priceData was already populated with fresh real OHLCV candles
             // (e.g. by the frontend pushing via /api/bot/candles)
             const hasRealCandles = this.priceData.length >= 50 && this.priceData[0].open !== undefined;
+            const hasFreshCandles = hasRealCandles && this.isCandleDataFresh(this.priceData);
 
-            if (!hasRealCandles) {
+            if (!hasFreshCandles) {
                 // Fetch live 6H candles from Bybit for XAU/USD
                 const symbol = 'XAUUSDT';
                 const interval = '360'; // 6h candles
@@ -104,7 +131,7 @@ class TradingBot {
                 }
                 
                 // Format for analysis (Bybit returns newest first, reverse to chronological)
-                this.priceData = json.result.list.reverse().map(k => ({
+                this.setPriceData(json.result.list.reverse().map(k => ({
                     timestamp: new Date(parseInt(k[0])),
                     open: parseFloat(k[1]),
                     high: parseFloat(k[2]),
@@ -112,7 +139,16 @@ class TradingBot {
                     close: parseFloat(k[4]),
                     volume: parseFloat(k[5]),
                     price: parseFloat(k[4])
-                }));
+                })), 'bybit_rest');
+            }
+
+            if (!this.isCandleDataFresh(this.priceData)) {
+                this.candleStale = true;
+                this.lastAnalysisTime = new Date().toISOString();
+                this.lastScore = 0;
+                this.lastSignal = 'NEUTRAL';
+                console.warn('Skipping analysis because XAU candle data is stale or invalid');
+                return;
             }
 
             // Perform analysis and make decision
@@ -186,7 +222,11 @@ class TradingBot {
             currentSignal: this.lastSignal || 'NEUTRAL',
             dailyTradeTaken: this.decisionEngine.dailyTradeTaken,
             dailyLossCount: this.decisionEngine.dailyLossCount,
-            circuitBreakerActive: this.decisionEngine.circuitBreakerActive
+            circuitBreakerActive: this.decisionEngine.circuitBreakerActive,
+            candleSource: this.lastCandleSource,
+            lastCandleUpdateTime: this.lastCandleUpdateTime,
+            lastCandleTimestamp: this.lastCandleTimestamp,
+            candleStale: this.candleStale
         };
     }
 
@@ -201,7 +241,12 @@ class TradingBot {
      * @param {Array|null} clientCandles - Raw candle arrays from frontend (bypasses server-side fetch)
      */
     async runBacktest(days = 90, strategy = 'default', clientCandles = null) {
-        console.log(`Starting XAU/USD backtest for ${days} days...`);
+        const backtestDays = Number.isFinite(Number(days)) && Number(days) > 0 ? Number(days) : 90;
+        const candlesPerDay = 4; // 6H candles
+        const warmupCandles = 50;
+        const requiredCandles = Math.ceil(backtestDays * candlesPerDay) + warmupCandles;
+
+        console.log(`Starting XAU/USD backtest for ${backtestDays} days...`);
         
         try {
             let historicalData = null;
@@ -272,7 +317,7 @@ class TradingBot {
                 console.log('Fetching XAU/USD candles from Bybit API...');
                 const symbol = 'XAUUSDT';
                 const interval = '360'; // 6h candles
-                const totalLimit = 500;
+                const totalLimit = requiredCandles;
                 
                 let end = anchoredEnd.getTime();
                 let allCandles = [];
@@ -329,6 +374,10 @@ class TradingBot {
                 }
             }
 
+            if (historicalData.length > requiredCandles) {
+                historicalData = historicalData.slice(-requiredCandles);
+            }
+
             // Build data hash for verification (first candle ts + last candle ts + count)
             const firstTs = historicalData[0].timestamp.toISOString();
             const lastTs = historicalData[historicalData.length - 1].timestamp.toISOString();
@@ -340,24 +389,30 @@ class TradingBot {
             const initialEquity = 50;
             const equityCurve = [];
             let activeTrade = null;
-            let consecutiveLosses = 0;
-            let cooldownCandles = 0;
+            let currentTradeDate = null;
+            let dailyLossCount = 0;
+            let lastTradeDate = null;
             
             const UnifiedStrategy = require('./unifiedStrategy');
             const uStrategy = new UnifiedStrategy();
+
+            const calculateTradePnl = (trade, exitPrice) => {
+                const CONTRACT_SIZE = 100;
+                const positionSize = trade.quantity * CONTRACT_SIZE;
+                return trade.action === 'BUY'
+                    ? (exitPrice - trade.entryPrice) * positionSize
+                    : (trade.entryPrice - exitPrice) * positionSize;
+            };
             
             // Loop through data using UnifiedStrategy
             for (let i = 50; i < historicalData.length; i++) {
                 const currentWindow = historicalData.slice(i - 50, i);
                 const currentCandle = historicalData[i];
-                
-                if (i % 10 === 0) {
-                    equityCurve.push({ day: equityCurve.length + 1, equity });
-                }
 
-                if (cooldownCandles > 0) {
-                    cooldownCandles--;
-                    if (!activeTrade) continue;
+                const candleDate = currentCandle.timestamp.toISOString().split('T')[0];
+                if (currentTradeDate !== candleDate) {
+                    currentTradeDate = candleDate;
+                    dailyLossCount = 0;
                 }
 
                 // Check active trade exit
@@ -367,9 +422,8 @@ class TradingBot {
                         equity += exitResult.pnl;
                         // No equity floor — let backtest reflect real losses accurately
                         if (exitResult.pnl < 0) {
-                            consecutiveLosses++;
-                            if (consecutiveLosses >= 2) { cooldownCandles = 3; consecutiveLosses = 0; }
-                        } else { consecutiveLosses = 0; }
+                            dailyLossCount++;
+                        }
                         
                         activeTrade.pnl = exitResult.pnl;
                         activeTrade.exitTimestamp = currentCandle.timestamp;
@@ -388,7 +442,7 @@ class TradingBot {
                     const timeInMinutes = hour * 60 + minute;
                     const isSessionOpen = (timeInMinutes >= 7 * 60 && timeInMinutes <= 17 * 60);
 
-                    if (isSessionOpen) {
+                    if (isSessionOpen && lastTradeDate !== candleDate && dailyLossCount < 2) {
                         const analysis = uStrategy.analyze(currentWindow);
                         
                         if (analysis.signal === 'BUY' || analysis.signal === 'SELL') {
@@ -396,6 +450,9 @@ class TradingBot {
                             const quantity = 0.01; // Fixed lot
                             
                             let sl = analysis.signal === 'BUY' ? rp.stopLoss.long : rp.stopLoss.short;
+                            let originalSl = sl;
+                            let tp1 = analysis.signal === 'BUY' ? rp.takeProfit.tp1Long : rp.takeProfit.tp1Short;
+                            let tp2 = analysis.signal === 'BUY' ? rp.takeProfit.tp2Long : rp.takeProfit.tp2Short;
 
                             // Enforce max 10% loss rule (tiered doubling)
                             let base = 50;
@@ -409,6 +466,15 @@ class TradingBot {
                             const currentSlDistance = Math.abs(currentCandle.open - sl);
                             if (currentSlDistance > maxSlPoints) {
                                 sl = analysis.signal === 'BUY' ? currentCandle.open - maxSlPoints : currentCandle.open + maxSlPoints;
+                                originalSl = sl;
+
+                                const cappedSlDistance = Math.abs(currentCandle.open - sl);
+                                tp1 = analysis.signal === 'BUY'
+                                    ? currentCandle.open + (cappedSlDistance * uStrategy.TP1_RR)
+                                    : currentCandle.open - (cappedSlDistance * uStrategy.TP1_RR);
+                                tp2 = analysis.signal === 'BUY'
+                                    ? currentCandle.open + (cappedSlDistance * uStrategy.TP2_RR)
+                                    : currentCandle.open - (cappedSlDistance * uStrategy.TP2_RR);
                             }
                             
                             activeTrade = {
@@ -417,18 +483,54 @@ class TradingBot {
                                 entryPrice: currentCandle.open,
                                 quantity,
                                 sl: sl,
-                                originalSl: sl,
-                                tp1: analysis.signal === 'BUY' ? rp.takeProfit.tp1Long : rp.takeProfit.tp1Short,
-                                tp2: analysis.signal === 'BUY' ? rp.takeProfit.tp2Long : rp.takeProfit.tp2Short,
+                                originalSl,
+                                tp1,
+                                tp2,
                                 atr: rp.atr,
                                 score: analysis.score,
                                 confluence: analysis.details.confluenceScorer?.details || '',
                                 timestamp: currentCandle.timestamp,
                                 status: 'OPEN'
                             };
+                            lastTradeDate = candleDate;
+
+                            const sameCandleExit = uStrategy.checkTradeExit(activeTrade, currentCandle);
+                            if (sameCandleExit.closed) {
+                                equity += sameCandleExit.pnl;
+                                if (sameCandleExit.pnl < 0) {
+                                    dailyLossCount++;
+                                }
+
+                                activeTrade.pnl = sameCandleExit.pnl;
+                                activeTrade.exitTimestamp = currentCandle.timestamp;
+                                activeTrade.exitReason = sameCandleExit.exitReason;
+                                activeTrade.exitPrice = sameCandleExit.exitPrice;
+                                activeTrade.status = 'CLOSED';
+                                trades.push({ ...activeTrade });
+                                activeTrade = null;
+                            }
                         }
                     }
                 }
+
+                const markedEquity = activeTrade
+                    ? equity + calculateTradePnl(activeTrade, currentCandle.close)
+                    : equity;
+                equityCurve.push({ day: equityCurve.length + 1, equity: markedEquity });
+            }
+
+            if (activeTrade) {
+                const finalCandle = historicalData[historicalData.length - 1];
+                const pnl = calculateTradePnl(activeTrade, finalCandle.close);
+                equity += pnl;
+                activeTrade.pnl = pnl;
+                activeTrade.exitTimestamp = finalCandle.timestamp;
+                activeTrade.exitReason = 'Backtest End';
+                activeTrade.exitPrice = finalCandle.close;
+                activeTrade.status = 'CLOSED';
+                trades.push({ ...activeTrade });
+                activeTrade = null;
+                equityCurve.push({ day: equityCurve.length + 1, equity });
             }
 
             // Calculate final metrics
@@ -460,9 +562,8 @@ class TradingBot {
                     const meanReturn = returns.reduce((s, r) => s + r, 0) / returns.length;
                     const variance = returns.reduce((s, r) => s + Math.pow(r - meanReturn, 2), 0) / (returns.length - 1);
                     const stdDev = Math.sqrt(variance);
-                    // Annualize: 6h candles, ~4 per day, equity sampled every 10 candles ≈ 2.5 days
-                    // ~146 samples/year, so annualization factor = sqrt(146)
-                    const annualizationFactor = Math.sqrt(365 / Math.max(days / equityCurve.length, 1));
+                    // Annualize per-candle mark-to-market equity samples.
+                    const annualizationFactor = Math.sqrt((equityCurve.length / Math.max(backtestDays, 1)) * 365);
                     sharpeRatio = stdDev > 0 ? (meanReturn / stdDev) * annualizationFactor : 0;
                 }
             }
@@ -480,7 +581,8 @@ class TradingBot {
                     source: dataSource,
                     candleCount: historicalData.length,
                     dateRange: `${firstTs.slice(0,10)} to ${lastTs.slice(0,10)}`,
-                    anchoredTo: dateKey
+                    anchoredTo: dateKey,
+                    requestedDays: backtestDays
                 },
                 trades: completedTrades.map(t => ({
                     id: t.id,

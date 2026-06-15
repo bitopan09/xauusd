@@ -67,6 +67,7 @@ db.serialize(() => {
   )`);
 
     // Migrate existing databases: add new columns if they don't exist
+    db.run(`ALTER TABLE trades ADD COLUMN tp2 REAL`, () => {});
     db.run(`ALTER TABLE trades ADD COLUMN atr REAL`, () => {});
     db.run(`ALTER TABLE trades ADD COLUMN original_sl REAL`, () => {});
 
@@ -323,6 +324,26 @@ app.post('/api/bot/candles', async (req, res) => {
             return res.status(400).json({ error: 'No candle data provided' });
         }
 
+        const isValidCandle = (k) => {
+            if (!Array.isArray(k) || k.length < 6) return false;
+            const timestamp = Number(k[0]);
+            const open = Number(k[1]);
+            const high = Number(k[2]);
+            const low = Number(k[3]);
+            const close = Number(k[4]);
+            const volume = Number(k[5]);
+            return [timestamp, open, high, low, close, volume].every(Number.isFinite)
+                && timestamp > 0
+                && high >= low
+                && open > 0
+                && close > 0
+                && volume >= 0;
+        };
+
+        if (!candles.every(isValidCandle)) {
+            return res.status(400).json({ error: 'Malformed candle data provided' });
+        }
+
         // Parse raw Bybit candle format to the structure the bot expects
         const sorted = [...candles].sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
         const priceData = sorted.map(k => ({
@@ -335,8 +356,12 @@ app.post('/api/bot/candles', async (req, res) => {
             price: parseFloat(k[4])
         }));
 
+        if (!tradingBot.isCandleDataFresh(priceData)) {
+            return res.status(400).json({ error: 'Candle data is stale or has an invalid timestamp' });
+        }
+
         // Feed candle data to the bot for analysis
-        tradingBot.priceData = priceData;
+        tradingBot.setPriceData(priceData, 'client_browser');
         await tradingBot._analyzeAndTrade();
 
         const status = tradingBot.getStatus();

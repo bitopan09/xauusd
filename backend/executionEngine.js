@@ -78,8 +78,9 @@ class ExecutionEngine {
 
         // Use dynamic SL/TP from the signal
         let sl = signal.sl || (action === 'BUY' ? entryPrice - 10 : entryPrice + 10);
-        const originalSl = sl;
-        const tp1 = signal.tp1 || (action === 'BUY' ? entryPrice + 30 : entryPrice - 30);
+        let originalSl = sl;
+        let tp1 = signal.tp1 || (action === 'BUY' ? entryPrice + 30 : entryPrice - 30);
+        let tp2 = signal.tp2 || (action === 'BUY' ? entryPrice + 50 : entryPrice - 50);
         const atr = signal.atr || 15; // ATR from analysis — critical for trailing stop
         const score = signal.score || 0;
         const notes = signal.notes || '';
@@ -100,14 +101,23 @@ class ExecutionEngine {
         const currentSlDistance = Math.abs(entryPrice - sl);
         if (currentSlDistance > maxSlPoints) {
             sl = action === 'BUY' ? entryPrice - maxSlPoints : entryPrice + maxSlPoints;
+            originalSl = sl;
+
+            const cappedSlDistance = Math.abs(entryPrice - sl);
+            tp1 = action === 'BUY'
+                ? entryPrice + (cappedSlDistance * this.strategy.TP1_RR)
+                : entryPrice - (cappedSlDistance * this.strategy.TP1_RR);
+            tp2 = action === 'BUY'
+                ? entryPrice + (cappedSlDistance * this.strategy.TP2_RR)
+                : entryPrice - (cappedSlDistance * this.strategy.TP2_RR);
         }
 
         return new Promise((resolve) => {
             const self = this;
             this.db.run(
-                `INSERT INTO trades (userId, action, entry_price, quantity, timestamp, status, sl, tp1, score, notes, trade_type, atr, original_sl) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paper', ?, ?)`,
-                [userId, action, entryPrice, tradeQuantity, timestamp.toISOString(), 'OPEN', sl, tp1, score, notes, atr, originalSl],
+                `INSERT INTO trades (userId, action, entry_price, quantity, timestamp, status, sl, tp1, tp2, score, notes, trade_type, atr, original_sl)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paper', ?, ?)`,
+                [userId, action, entryPrice, tradeQuantity, timestamp.toISOString(), 'OPEN', sl, tp1, tp2, score, notes, atr, originalSl],
                 function (err) {
                     if (err) {
                         console.error('Error logging trade to database:', err);
@@ -125,12 +135,12 @@ class ExecutionEngine {
                         quantity: tradeQuantity,
                         timestamp,
                         status: 'OPEN',
-                        sl, originalSl, tp1, atr, score, notes
+                        sl, originalSl, tp1, tp2, atr, score, notes
                     };
 
                     self.activeTrades.set(tradeId, trade);
 
-                    self._sendAlert(`[${userId}] Gold trade executed: ${action} ${tradeQuantity} oz XAU at $${entryPrice.toFixed(2)} | SL: $${sl.toFixed(2)} | TP1: $${tp1.toFixed(2)} | ATR: $${atr.toFixed(2)}`);
+                    self._sendAlert(`[${userId}] Gold trade executed: ${action} ${tradeQuantity} oz XAU at $${entryPrice.toFixed(2)} | SL: $${sl.toFixed(2)} | TP1: $${tp1.toFixed(2)} | TP2: $${tp2.toFixed(2)} | ATR: $${atr.toFixed(2)}`);
 
                     resolve({
                         success: true,
@@ -174,10 +184,18 @@ class ExecutionEngine {
             };
 
             // Use the SAME trailing stop + exit logic as the backtest
+            const previousSl = trade.sl;
             const exitResult = this.strategy.checkTradeExit(strategyTrade, currentCandle);
 
             // Sync the (possibly trailed) SL back to the live trade
             trade.sl = strategyTrade.sl;
+            if (Math.abs((previousSl || 0) - strategyTrade.sl) > 0.000001 && !exitResult.closed) {
+                this.db.run(
+                    `UPDATE trades SET sl = ? WHERE id = ? AND status = 'OPEN'`,
+                    [strategyTrade.sl, tradeId],
+                    (err) => { if (err) console.error('Error persisting trailing SL:', err); }
+                );
+            }
 
             if (exitResult.closed) {
                 this._closeTrade(tradeId, exitResult.exitPrice, exitResult.exitReason);
@@ -216,9 +234,10 @@ class ExecutionEngine {
              pnl = ?, 
              status = ?, 
              exit_reason = ?, 
-             exit_timestamp = ?
+             exit_timestamp = ?,
+             sl = ?
              WHERE id = ?`,
-            [exitPrice, pnl, 'CLOSED', reason, new Date().toISOString(), tradeId],
+            [exitPrice, pnl, 'CLOSED', reason, new Date().toISOString(), trade.sl, tradeId],
             (err) => {
                 if (err) {
                     console.error('Error updating trade in database:', err);

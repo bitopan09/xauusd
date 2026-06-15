@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { API_BASE_URL, userId } from '../services/api';
 
+const BACKTEST_DAYS = 90;
+
 const Backtester = () => {
     const [results, setResults] = useState(null);
     const [isRunning, setIsRunning] = useState(false);
@@ -14,7 +16,7 @@ const Backtester = () => {
     const fetchCandlesFromBrowser = async () => {
         const symbol = 'XAUUSDT';
         const interval = '360'; // 6h candles
-        const totalLimit = 500;
+        const totalLimit = Math.ceil(BACKTEST_DAYS * 4) + 50;
 
         // Anchor to start of current UTC day for reproducibility
         const now = new Date();
@@ -65,7 +67,7 @@ const Backtester = () => {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    days: 90,
+                    days: BACKTEST_DAYS,
                     strategy: 'confluence_scoring',
                     userId: userId,
                     candles: candles
@@ -92,7 +94,7 @@ const Backtester = () => {
     const downloadCsv = () => {
         if (!results) return;
 
-        let csv = 'XAU/USD Backtest Summary (90 Days)\n';
+        let csv = `XAU/USD Backtest Summary (${BACKTEST_DAYS} Days)\n`;
         csv += `Metric,Value\n`;
         csv += `Total Trades,${results.totalTrades}\n`;
         csv += `Win Rate,${(results.winRate * 100).toFixed(1)}%\n`;
@@ -160,7 +162,7 @@ const Backtester = () => {
                     disabled={isRunning}
                     className={isRunning ? 'running' : ''}
                 >
-                    {isRunning ? (progress || 'Running...') : 'Run 90-Day Gold Backtest'}
+                    {isRunning ? (progress || 'Running...') : `Run ${BACKTEST_DAYS}-Day Gold Backtest`}
                 </button>
             </div>
 
@@ -179,7 +181,7 @@ const Backtester = () => {
 
             {results && (
                 <div className="backtester-results">
-                    <h3>Backtest Results (90 days)</h3>
+                    <h3>Backtest Results ({BACKTEST_DAYS} days)</h3>
 
                     {results.dataInfo && (
                         <div style={{ marginBottom: '12px', padding: '6px 10px', background: 'rgba(34,197,94,0.08)', borderRadius: '6px', border: '1px solid rgba(34,197,94,0.2)', fontSize: '0.72rem', color: '#86efac', display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
@@ -264,7 +266,7 @@ const Backtester = () => {
             )}
 
             {!results && !isRunning && !error && (
-                <p>Click "Run 90-Day Gold Backtest" to see historical XAU/USD performance</p>
+                <p>{`Click "Run ${BACKTEST_DAYS}-Day Gold Backtest" to see historical XAU/USD performance`}</p>
             )}
         </div>
     );
