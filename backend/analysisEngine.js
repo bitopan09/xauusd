@@ -38,9 +38,11 @@ class AnalysisEngine {
             score: result.score,
             details: {
                 confluenceScorer: result.details.confluenceScorer,
+                filterBreakdown: result.details.filterBreakdown,
                 riskCalculator: result.details.riskCalculator,
                 analysis: {
                     confluenceScorer: result.details.confluenceScorer,
+                    filterBreakdown: result.details.filterBreakdown,
                     riskCalculator: result.details.riskCalculator
                 },
                 timestamp: result.details.timestamp

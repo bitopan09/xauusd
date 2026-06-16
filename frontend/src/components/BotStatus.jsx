@@ -81,6 +81,28 @@ const BotStatus = () => {
                         </p>
                     )}
                     
+                    {bot.filterBreakdown && (
+                        <div className="signal-filter-details">
+                            <h5 style={{ margin: '12px 0 6px', color: '#e2e8f0', fontSize: '0.85rem' }}>Signal Filter Breakdown</h5>
+                            <table style={{ width: '100%', fontSize: '0.78rem', borderCollapse: 'collapse' }}>
+                                <tbody>
+                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Score</td><td style={{ textAlign: 'right' }}>{bot.filterBreakdown.score.toFixed(1)}/{bot.filterBreakdown.threshold}</td></tr>
+                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Price</td><td style={{ textAlign: 'right' }}>${Number(bot.filterBreakdown.currentPrice).toFixed(2)}</td></tr>
+                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>EMA9</td><td style={{ textAlign: 'right', color: bot.filterBreakdown.bullishEma ? '#4ade80' : '#f87171' }}>${Number(bot.filterBreakdown.ema9Val).toFixed(2)}</td></tr>
+                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>EMA21</td><td style={{ textAlign: 'right', color: bot.filterBreakdown.bearishEma ? '#4ade80' : '#f87171' }}>${Number(bot.filterBreakdown.ema21Val).toFixed(2)}</td></tr>
+                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>EMA50</td><td style={{ textAlign: 'right' }}>${Number(bot.filterBreakdown.ema50Val).toFixed(2)}</td></tr>
+                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Dir</td><td style={{ textAlign: 'right' }}>{bot.filterBreakdown.confluenceDirection}</td></tr>
+                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>EMA9>21</td><td style={{ textAlign: 'right', color: bot.filterBreakdown.bullishEma ? '#4ade80' : '#94a3b8' }}>{bot.filterBreakdown.bullishEma ? 'YES' : 'NO'}</td></tr>
+                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Price>50</td><td style={{ textAlign: 'right', color: bot.filterBreakdown.bullishPrice ? '#4ade80' : '#94a3b8' }}>{bot.filterBreakdown.bullishPrice ? 'YES' : 'NO'}</td></tr>
+                                </tbody>
+                            </table>
+                            {bot.filterBreakdown.rejectedReason && (
+                                <p style={{ fontSize: '0.75rem', marginTop: '6px', color: '#fbbf24', lineHeight: '1.3' }}>
+                                    ⚠ {bot.filterBreakdown.rejectedReason}
+                                </p>
+                            )}
+                        </div>
+                    )}
                 </div>
                 
                 <div className="today-trade-card">

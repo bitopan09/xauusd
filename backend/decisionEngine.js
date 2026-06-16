@@ -115,12 +115,17 @@ class DecisionEngine {
         }
 
         if (analysis.signal !== 'BUY' && analysis.signal !== 'SELL') {
+            const fb = analysis.details?.filterBreakdown;
+            const reason = fb?.rejectedReason
+                ? `Filter rejected: ${fb.rejectedReason}`
+                : 'Confluence passed, but EMA/direction filter did not confirm a trade signal';
             return {
                 action: 'SKIP',
-                reason: 'Confluence passed, but EMA/direction filter did not confirm a trade signal',
+                reason,
                 details: {
                     score: analysis.score,
                     signal: analysis.signal,
+                    filterBreakdown: fb,
                     analysis: analysis.details
                 }
             };

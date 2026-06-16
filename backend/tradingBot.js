@@ -171,6 +171,7 @@ class TradingBot {
             // Save current live score for frontend dashboard
             this.lastScore = decision.details ? decision.details.score : 0;
             this.lastSignal = decision.action;
+            this.lastFilterBreakdown = decision.details?.filterBreakdown || decision.details?.analysis?.filterBreakdown || null;
 
             // If decision is to trade, execute it
             if (decision.action === 'BUY' || decision.action === 'SELL') {
@@ -234,7 +235,8 @@ class TradingBot {
             candleSource: this.lastCandleSource,
             lastCandleUpdateTime: this.lastCandleUpdateTime,
             lastCandleTimestamp: this.lastCandleTimestamp,
-            candleStale: this.candleStale
+            candleStale: this.candleStale,
+            filterBreakdown: this.lastFilterBreakdown
         };
     }
 

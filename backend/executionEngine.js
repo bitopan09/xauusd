@@ -50,17 +50,19 @@ class ExecutionEngine {
      * @param {string} userId - User ID for the trade
      * @returns {Promise<Object>} Execution result
      */
-    async executeTrade(signal, quantity = 0.01, userId = 'default') {
+    async executeTrade(signal, quantity = 0.01, userId = 'default', allowMultiple = false) {
         const { action, price } = signal;
 
         if (action === 'SKIP') {
             return { success: false, reason: 'Signal was to skip trade' };
         }
 
-        // Check user's active trades (only 1 active trade at a time)
-        const userTrades = Array.from(this.activeTrades.values()).filter(t => t.userId === userId);
-        if (userTrades.length >= 1) {
-            return { success: false, reason: 'Maximum active trades reached (1 trade allowed)' };
+        // Check user's active trades (skip for manual trades)
+        if (!allowMultiple) {
+            const userTrades = Array.from(this.activeTrades.values()).filter(t => t.userId === userId);
+            if (userTrades.length >= 1) {
+                return { success: false, reason: 'Maximum active trades reached (1 trade allowed)' };
+            }
         }
 
         const entryPrice = price;

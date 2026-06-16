@@ -422,21 +422,60 @@ class UnifiedStrategy {
         const { score, indicators, direction } = confluence;
 
         let signal = 'NEUTRAL';
+        const prices = priceData.map(p => p.price);
+        const currentPrice = priceData[priceData.length - 1].price;
+        const ema9 = this.calculateEma(prices, 9);
+        const ema21 = this.calculateEma(prices, 21);
+        const ema9Val = ema9[ema9.length - 1];
+        const ema21Val = ema21[ema21.length - 1];
+
+        const bullishEma = ema9Val > ema21Val;
+        const bearishEma = ema9Val < ema21Val;
+        const bullishPrice = currentPrice > indicators.ema50Val;
+        const bearishPrice = currentPrice < indicators.ema50Val;
+
+        let filterBreakdown = {
+            scoreMet: score >= this.CONFLUENCE_THRESHOLD,
+            threshold: this.CONFLUENCE_THRESHOLD,
+            score,
+            confluenceDirection: direction,
+            ema9Val,
+            ema21Val,
+            ema50Val: indicators.ema50Val,
+            currentPrice,
+            bullishEma,
+            bearishEma,
+            bullishPrice,
+            bearishPrice,
+            emaBullish: bullishEma && bullishPrice,
+            emaBearish: bearishEma && bearishPrice,
+            directionAgrees: null,
+            rejectedReason: null
+        };
 
         if (score >= this.CONFLUENCE_THRESHOLD) {
-            const prices = priceData.map(p => p.price);
-            const ema9 = this.calculateEma(prices, 9);
-            const ema21 = this.calculateEma(prices, 21);
-            const ema9Val = ema9[ema9.length - 1];
-            const ema21Val = ema21[ema21.length - 1];
-            const currentPrice = priceData[priceData.length - 1].price;
+            const bullish = bullishEma && bullishPrice;
+            const bearish = bearishEma && bearishPrice;
 
-            const bullish = ema9Val > ema21Val && currentPrice > indicators.ema50Val;
-            const bearish = ema9Val < ema21Val && currentPrice < indicators.ema50Val;
-
-            // FIXED: Only take a trade if EMA direction AGREES with confluence direction
-            if (bullish && direction === 'BULLISH') signal = 'BUY';
-            else if (bearish && direction === 'BEARISH') signal = 'SELL';
+            if (bullish && direction === 'BULLISH') {
+                signal = 'BUY';
+            } else if (bearish && direction === 'BEARISH') {
+                signal = 'SELL';
+            } else {
+                if (bullish && direction !== 'BULLISH') {
+                    filterBreakdown.directionAgrees = false;
+                    filterBreakdown.rejectedReason = `EMA bullish but confluence direction is ${direction}`;
+                } else if (bearish && direction !== 'BEARISH') {
+                    filterBreakdown.directionAgrees = false;
+                    filterBreakdown.rejectedReason = `EMA bearish but confluence direction is ${direction}`;
+                } else if (!bullish && !bearish) {
+                    filterBreakdown.rejectedReason = !bullishEma && !bearishEma
+                        ? 'EMA9/21 flat — no clear trend direction'
+                        : bullishEma
+                            ? 'EMA9 > EMA21 but price below EMA50'
+                            : 'EMA9 < EMA21 but price above EMA50';
+                }
+            }
         }
 
         // Calculate risk parameters
@@ -447,6 +486,7 @@ class UnifiedStrategy {
             score: confluence.score,
             details: {
                 confluenceScorer: confluence,
+                filterBreakdown,
                 riskCalculator: riskParams,
                 timestamp: new Date().toISOString()
             }

@@ -426,7 +426,7 @@ app.post('/api/manual-trade', async (req, res) => {
             }
             
             const signal = { action: action.toUpperCase(), price: row.price };
-            const result = await tradingBot.executionEngine.executeTrade(signal, 0.01, user);
+            const result = await tradingBot.executionEngine.executeTrade(signal, 0.01, user, true);
             
             if (result.success) {
                 res.json(result);
