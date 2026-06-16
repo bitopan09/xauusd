@@ -3,8 +3,12 @@ node_modules/
 .env.*
 !.env.example
 trading.db
+trading.db-shm
+trading.db-wal
 database.sqlite
 *.db
+*.db-shm
+*.db-wal
 frontend/dist/
 .DS_Store
 *.log
