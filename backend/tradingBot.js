@@ -9,7 +9,6 @@ const { isUsdNewsBlocked } = require('./newsFilter');
 class TradingBot {
     constructor(db) {
         this.db = db;
-        this.analysisEngine = new AnalysisEngine();
         this.decisionEngine = new DecisionEngine(this.db);
         this.executionEngine = new ExecutionEngine(this.db);
         
