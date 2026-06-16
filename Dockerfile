@@ -8,7 +8,7 @@ COPY package*.json ./
 RUN npm install --omit=dev
 
 COPY frontend/package*.json frontend/
-RUN cd frontend && npm install --omit=dev
+RUN cd frontend && npm install
 
 COPY . .
 RUN cd frontend && npm run build
