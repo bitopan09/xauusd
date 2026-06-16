@@ -301,20 +301,7 @@ class ExecutionEngine {
         const telegramService = require('./telegramService');
         telegramService.sendMessage(message).catch(() => {});
 
-        const EmailService = require('./emailService');
-        if (EmailService && (process.env.EMAIL_RECIPIENT || process.env.NOTIFY_EMAIL)) {
-            try {
-                const trade = {
-                    action: message.includes('BUY') ? 'BUY' : (message.includes('SELL') ? 'SELL' : 'INFO'),
-                    entry_price: null,
-                    quantity: 0.01,
-                    timestamp: new Date()
-                };
-                await EmailService.sendTradeNotification(trade, message);
-            } catch (error) {
-                console.error('Email error:', error);
-            }
-        }
+
     }
 
     async manualExitTrade(tradeId, exitPrice) {

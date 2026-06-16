@@ -8,22 +8,6 @@ const STATUS_INTERVAL = 10000;
 const BotStatus = () => {
     const [status, setStatus] = useState(null);
     const [loading, setLoading] = useState(true);
-    const [emailTesting, setEmailTesting] = useState(false);
-    const [emailMessage, setEmailMessage] = useState(null);
-
-    const testEmail = async () => {
-        setEmailTesting(true);
-        setEmailMessage(null);
-        try {
-            await fetch(`${API_BASE_URL}/email/test`, { method: 'POST' });
-            setEmailMessage({ type: 'success', text: 'Test email triggered successfully! Check your inbox.' });
-        } catch (error) {
-            setEmailMessage({ type: 'error', text: 'Failed to trigger test email.' });
-        }
-        setEmailTesting(false);
-        setTimeout(() => setEmailMessage(null), 5000);
-    };
-
     useEffect(() => {
         const fetchStatus = async () => {
             try {
@@ -97,18 +81,6 @@ const BotStatus = () => {
                         </p>
                     )}
                     
-                    <button 
-                        onClick={testEmail} 
-                        disabled={emailTesting}
-                        style={{ marginTop: '12px', padding: '6px 12px', background: '#d4af37', color: '#0a0b10', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600 }}
-                    >
-                        {emailTesting ? 'Sending...' : 'Test Email Alert'}
-                    </button>
-                    {emailMessage && (
-                        <p style={{ fontSize: '0.8rem', marginTop: '6px', color: emailMessage.type === 'success' ? '#4ade80' : '#f87171' }}>
-                            {emailMessage.text}
-                        </p>
-                    )}
                 </div>
                 
                 <div className="today-trade-card">

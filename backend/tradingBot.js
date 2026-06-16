@@ -1,6 +1,5 @@
 const DecisionEngine = require('./decisionEngine');
 const ExecutionEngine = require('./executionEngine');
-const emailService = require('./emailService');
 const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
@@ -202,9 +201,6 @@ class TradingBot {
                 if (result.success) {
                     console.log(`Gold trade executed: ${result.message}`);
                     this.decisionEngine.dailyTradeTaken = true;
-                    if (process.env.SEND_EMAIL_ON_TRADE === 'true') {
-                        emailService.sendTradeNotification(result.trade, `AUTO ${result.trade.action}`);
-                    }
                 } else {
                     console.log(`Gold trade execution failed: ${result.reason}`);
                 }

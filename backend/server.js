@@ -8,7 +8,6 @@ const path = require('path');
 const dotenv = require('dotenv');
 const schedule = require('node-schedule');
 const TradingBot = require('./tradingBot');
-const emailService = require('./emailService');
 const telegramService = require('./telegramService');
 
 dotenv.config();
@@ -534,47 +533,7 @@ const sendTelegramAlert = (message) => {
 schedule.scheduleJob('0 0 * * *', () => {
     console.log('[' + new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) + '] Daily trade lock reset');
     
-    if (process.env.SEND_DAILY_SUMMARY === 'true') {
-        const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
-        db.all("SELECT * FROM trades WHERE timestamp LIKE ? AND status = 'CLOSED'", [`${yesterday}%`], (err, rows) => {
-            if (rows && rows.length > 0) {
-                const wins = rows.filter(t => t.pnl > 0);
-                const summary = {
-                    tradesExecuted: rows.length,
-                    winningTrades: wins.length,
-                    losingTrades: rows.length - wins.length,
-                    totalPnl: rows.reduce((sum, t) => sum + (t.pnl || 0), 0)
-                };
-                emailService.sendDailySummary(summary);
-                telegramService.sendDailySummary(summary);
-            }
-        });
-    }
-    
     sendTelegramAlert('Gold bot: Daily trade lock reset — new trading day started');
-});
-
-// Email endpoints
-app.post('/api/email/test', async (req, res) => {
-    try {
-        const result = await emailService.sendAlert(
-            'Test Email from Gold Bot',
-            'This is a test email to verify your email configuration is working correctly.',
-            'INFO'
-        );
-        res.json({ success: result, message: result ? 'Test email sent successfully' : 'Failed to send test email' });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.get('/api/email/status', (req, res) => {
-    res.json({
-        configured: emailService.initialized,
-        sendOnTrade: process.env.SEND_EMAIL_ON_TRADE === 'true',
-        sendDailySummary: process.env.SEND_DAILY_SUMMARY === 'true',
-        notificationEmail: process.env.NOTIFY_EMAIL || process.env.EMAIL_USER || 'Not configured'
-    });
 });
 
 // Telegram endpoints
@@ -626,7 +585,6 @@ const server_instance = server.listen(PORT, '0.0.0.0', () => {
     console.log(`Lot Size: FIXED 0.01 lot (~1 oz)`);
     console.log(`Session: 07:00-17:00 UTC (12:30 PM-10:30 PM IST)`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`Email Service: ${emailService.initialized ? '✅ Enabled' : '❌ Disabled'}`);
     console.log(`Telegram Service: ${telegramService.configured ? '✅ Enabled' : '❌ Disabled'}`);
     console.log(`${'='.repeat(60)}\n`);
     
@@ -649,10 +607,6 @@ const server_instance = server.listen(PORT, '0.0.0.0', () => {
             console.log('[AUTO-START] Gold trading bot is now running!');
             
             const startupMsg = `GoldForge Bot Started\nTime: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST\nSession: 07:00-17:00 UTC\nLot Size: Fixed 0.01 lot`;
-            
-            if (emailService.initialized && process.env.SEND_ERROR_ALERTS === 'true') {
-                emailService.sendAlert('Gold Trading Bot Started', startupMsg, 'INFO');
-            }
             telegramService.sendMessage(`\u{1F680} ${startupMsg}`);
         }, 2000);
     }
