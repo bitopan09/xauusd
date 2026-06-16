@@ -101,7 +101,7 @@ class DecisionEngine {
         }
 
         // Check if score meets the configured strategy threshold
-        const threshold = analysis.details?.confluenceScorer?.threshold ?? 6;
+        const threshold = analysis.details?.confluenceScorer?.threshold ?? 5.5;
         if (analysis.score < threshold) {
             return {
                 action: 'SKIP',

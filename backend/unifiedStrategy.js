@@ -12,7 +12,7 @@ class UnifiedStrategy {
             return Number.isFinite(value) ? value : fallback;
         };
 
-        this.CONFLUENCE_THRESHOLD = numberFromEnv('CONFLUENCE_THRESHOLD', 6); // Minimum score to take a trade
+        this.CONFLUENCE_THRESHOLD = numberFromEnv('CONFLUENCE_THRESHOLD', 5.5); // Minimum score to take a trade
         this.MAX_SCORE = 10;
         this.MIN_DIRECTIONAL_MARGIN = numberFromEnv('MIN_DIRECTIONAL_MARGIN', 1);
         this.FIXED_QUANTITY = Number(process.env.XAU_QUANTITY) || 0.01;  // Configurable via env
