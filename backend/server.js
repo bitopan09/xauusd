@@ -603,12 +603,20 @@ app.get('/api/telegram/status', (req, res) => {
     res.json(telegramService.getStatus());
 });
 
-// Fallback to serve React's index.html
-app.use((req, res) => {
+// Fallback to serve React's index.html for client-side routing
+app.get('/{*splat}', (req, res) => {
     res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
 });
 
 const PORT = process.env.PORT || 5002;
+
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled rejection:', reason);
+});
+
 const server_instance = server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n${'='.repeat(60)}`);
     console.log(`🥇 GoldForge — XAU/USD Trading Bot Server Started`);
