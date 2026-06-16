@@ -377,15 +377,15 @@ class UnifiedStrategy {
         else if (ote.signal === 'BEARISH') { bearScore += this.weights.ote; details.push('OTE bear'); }
 
         // Factor 8: Order Block / FVG
-        if (obfvg.signal === 'BULLISH' && obfvg.strength > 2) { bullScore += this.weights.obfvg; details.push('OB/FVG ↑'); }
-        else if (obfvg.signal === 'BEARISH' && obfvg.strength > 2) { bearScore += this.weights.obfvg; details.push('OB/FVG ↓'); }
+        if (obfvg.signal === 'BULLISH' && obfvg.strength > 0) { bullScore += this.weights.obfvg; details.push('OB/FVG ↑'); }
+        else if (obfvg.signal === 'BEARISH' && obfvg.strength > 0) { bearScore += this.weights.obfvg; details.push('OB/FVG ↓'); }
 
         // Factor 9: CHoCH / BOS Structure Break
         if (structure.signal === 'BULLISH') { bullScore += this.weights.structure; details.push('BOS/CHoCH ↑'); }
         else if (structure.signal === 'BEARISH') { bearScore += this.weights.structure; details.push('BOS/CHoCH ↓'); }
 
         // Factor 10: Volume Confirmation (direction-neutral)
-        if (recentVol > prevVol * 1.1) {
+        if (recentVol > prevVol * 1.05) {
             // Volume confirms the dominant direction
             if (bullScore > bearScore) { bullScore += this.weights.volume; details.push('Vol confirms ↑'); }
             else if (bearScore > bullScore) { bearScore += this.weights.volume; details.push('Vol confirms ↓'); }
@@ -461,6 +461,26 @@ class UnifiedStrategy {
                 signal = 'BUY';
             } else if (bearish && direction === 'BEARISH') {
                 signal = 'SELL';
+            } else if (score >= 7) {
+                if (direction === 'BULLISH' && (bullishEma || bullishPrice)) {
+                    signal = 'BUY';
+                } else if (direction === 'BEARISH' && (bearishEma || bearishPrice)) {
+                    signal = 'SELL';
+                } else {
+                    if (bullish && direction !== 'BULLISH') {
+                        filterBreakdown.directionAgrees = false;
+                        filterBreakdown.rejectedReason = `EMA bullish but confluence direction is ${direction}`;
+                    } else if (bearish && direction !== 'BEARISH') {
+                        filterBreakdown.directionAgrees = false;
+                        filterBreakdown.rejectedReason = `EMA bearish but confluence direction is ${direction}`;
+                    } else if (!bullish && !bearish) {
+                        filterBreakdown.rejectedReason = !bullishEma && !bearishEma
+                            ? 'EMA9/21 flat — no clear trend direction'
+                            : bullishEma
+                                ? 'EMA9 > EMA21 but price below EMA50'
+                                : 'EMA9 < EMA21 but price above EMA50';
+                    }
+                }
             } else {
                 if (bullish && direction !== 'BULLISH') {
                     filterBreakdown.directionAgrees = false;
