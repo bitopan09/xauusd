@@ -105,40 +105,53 @@ class TradingBot {
      */
     async _analyzeAndTrade() {
         try {
-            // Skip fetch only if priceData was already populated with fresh real OHLCV candles
-            // (e.g. by the frontend pushing via /api/bot/candles)
             const hasRealCandles = this.priceData.length >= 50 && this.priceData[0].open !== undefined;
             const hasFreshCandles = hasRealCandles && this.isCandleDataFresh(this.priceData);
 
             if (!hasFreshCandles) {
-                // Fetch live 6H candles from Bybit for XAU/USD
-                const symbol = 'XAUUSDT';
-                const interval = '360'; // 6h candles
-                const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=200`;
-                
-                let json;
-                try {
-                    json = await this._fetchBybitData(url);
-                } catch (err) {
-                    console.error('Failed to fetch live XAU candles:', err.message);
-                    return;
+                this.lastServerFetchFail = this.lastServerFetchFail || 0;
+                const hoursSinceLastFail = (Date.now() - this.lastServerFetchFail) / 3600000;
+
+                if (hoursSinceLastFail > 6) {
+                    const symbol = 'XAUUSDT';
+                    const interval = '360';
+                    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=200`;
+
+                    let json;
+                    try {
+                        json = await this._fetchBybitData(url);
+
+                        if (!json || json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) {
+                            this.lastServerFetchFail = Date.now();
+                            if (this._first403Logged) {
+                                console.warn('Bybit API still blocked — waiting for browser candle relay');
+                            } else {
+                                console.error('Failed to fetch live XAU candles:', 'Bybit API blocked on cloud (expected) — browser relay will supply candles');
+                                this._first403Logged = true;
+                            }
+                            return;
+                        }
+
+                        this.lastServerFetchFail = 0;
+                        this.setPriceData(json.result.list.reverse().map(k => ({
+                            timestamp: new Date(parseInt(k[0])),
+                            open: parseFloat(k[1]),
+                            high: parseFloat(k[2]),
+                            low: parseFloat(k[3]),
+                            close: parseFloat(k[4]),
+                            volume: parseFloat(k[5]),
+                            price: parseFloat(k[4])
+                        })), 'bybit_rest');
+                    } catch (err) {
+                        this.lastServerFetchFail = Date.now();
+                        if (!this._first403Logged) {
+                            console.warn('Bybit server fetch unavailable — browser relay will supply candles');
+                            this._first403Logged = true;
+                        }
+                        return;
+                    }
                 }
-                
-                if (!json || json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) {
-                    console.error('Invalid Bybit response for XAU candles');
-                    return;
-                }
-                
-                // Format for analysis (Bybit returns newest first, reverse to chronological)
-                this.setPriceData(json.result.list.reverse().map(k => ({
-                    timestamp: new Date(parseInt(k[0])),
-                    open: parseFloat(k[1]),
-                    high: parseFloat(k[2]),
-                    low: parseFloat(k[3]),
-                    close: parseFloat(k[4]),
-                    volume: parseFloat(k[5]),
-                    price: parseFloat(k[4])
-                })), 'bybit_rest');
+
             }
 
             if (!this.isCandleDataFresh(this.priceData)) {
@@ -146,7 +159,11 @@ class TradingBot {
                 this.lastAnalysisTime = new Date().toISOString();
                 this.lastScore = 0;
                 this.lastSignal = 'NEUTRAL';
-                console.warn('Skipping analysis because XAU candle data is stale or invalid');
+                if (this._first403Logged) {
+                    console.log('Waiting for browser candle relay...');
+                } else {
+                    console.warn('No fresh candle data available — waiting for browser relay');
+                }
                 return;
             }
 
