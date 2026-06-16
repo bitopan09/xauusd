@@ -1,4 +1,3 @@
-const TelegramBot = require('telegram-bot-api');
 const dotenv = require('dotenv');
 const UnifiedStrategy = require('./unifiedStrategy');
 
@@ -7,20 +6,9 @@ dotenv.config();
 class ExecutionEngine {
     constructor(db) {
         this.db = db;
-        this.FIXED_QUANTITY = Number(process.env.XAU_QUANTITY) || 0.01; // Configurable via env
+        this.FIXED_QUANTITY = Number(process.env.XAU_QUANTITY) || 0.01;
         this.MAX_LOSS_PERCENT = Number(process.env.MAX_LOSS_PERCENT) || 5;
-        this.strategy = new UnifiedStrategy(); // Single source of truth for trailing stop + exit logic
-
-        // Initialize Telegram bot (placeholder)
-        this.bot = null;
-        if (process.env.TELEGRAM_BOT_TOKEN) {
-            try {
-                this.bot = new TelegramBot({ token: process.env.TELEGRAM_BOT_TOKEN });
-                console.log('Telegram bot initialized');
-            } catch (error) {
-                console.error('Error initializing Telegram bot:', error);
-            }
-        }
+        this.strategy = new UnifiedStrategy();
 
         // Active trades tracking
         this.activeTrades = new Map();
@@ -310,13 +298,8 @@ class ExecutionEngine {
     async _sendAlert(message) {
         console.log(`ALERT: ${message}`);
         
-        if (this.bot && process.env.TELEGRAM_CHAT_ID) {
-            try {
-                await this.bot.sendMessage({ chat_id: process.env.TELEGRAM_CHAT_ID, text: message });
-            } catch (error) {
-                console.error('Telegram error:', error);
-            }
-        }
+        const telegramService = require('./telegramService');
+        telegramService.sendMessage(message).catch(() => {});
 
         const EmailService = require('./emailService');
         if (EmailService && (process.env.EMAIL_RECIPIENT || process.env.NOTIFY_EMAIL)) {

@@ -6,10 +6,10 @@ const fetch = require('node-fetch');
 const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
-const TelegramBot = require('telegram-bot-api');
 const schedule = require('node-schedule');
 const TradingBot = require('./tradingBot');
 const emailService = require('./emailService');
+const telegramService = require('./telegramService');
 
 dotenv.config();
 
@@ -526,20 +526,8 @@ app.get('/api/trades/export', (req, res) => {
 });
 
 // Telegram bot setup
-let bot;
-if (process.env.TELEGRAM_BOT_TOKEN) {
-    bot = new TelegramBot({ token: process.env.TELEGRAM_BOT_TOKEN });
-    bot.getMe().then((me) => {
-        console.log(`Telegram bot started: @${me.username}`);
-    }).catch((err) => {
-        console.error('Error starting Telegram bot:', err);
-    });
-}
-
 const sendTelegramAlert = (message) => {
-    if (bot && process.env.TELEGRAM_CHAT_ID) {
-        bot.sendMessage({ chat_id: process.env.TELEGRAM_CHAT_ID, text: message }).catch(() => {});
-    }
+    telegramService.sendMessage(message).catch(() => {});
 };
 
 // Schedule daily tasks
@@ -547,17 +535,18 @@ schedule.scheduleJob('0 0 * * *', () => {
     console.log('[' + new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) + '] Daily trade lock reset');
     
     if (process.env.SEND_DAILY_SUMMARY === 'true') {
-        // Query yesterday's trades (this job runs at midnight, so yesterday just ended)
         const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
         db.all("SELECT * FROM trades WHERE timestamp LIKE ? AND status = 'CLOSED'", [`${yesterday}%`], (err, rows) => {
             if (rows && rows.length > 0) {
                 const wins = rows.filter(t => t.pnl > 0);
-                emailService.sendDailySummary({
+                const summary = {
                     tradesExecuted: rows.length,
                     winningTrades: wins.length,
                     losingTrades: rows.length - wins.length,
                     totalPnl: rows.reduce((sum, t) => sum + (t.pnl || 0), 0)
-                });
+                };
+                emailService.sendDailySummary(summary);
+                telegramService.sendDailySummary(summary);
             }
         });
     }
@@ -588,6 +577,32 @@ app.get('/api/email/status', (req, res) => {
     });
 });
 
+// Telegram endpoints
+app.post('/api/telegram/test', async (req, res) => {
+    try {
+        const result = await telegramService.verifyConnection();
+        if (result.success) {
+            await telegramService.sendMessage('\u2705 GoldForge Telegram notification test successful!');
+        }
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/telegram/verify', async (req, res) => {
+    try {
+        const result = await telegramService.verifyConnection();
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/telegram/status', (req, res) => {
+    res.json(telegramService.getStatus());
+});
+
 // Fallback to serve React's index.html
 app.use((req, res) => {
     res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
@@ -604,8 +619,20 @@ const server_instance = server.listen(PORT, '0.0.0.0', () => {
     console.log(`Session: 07:00-17:00 UTC (12:30 PM-10:30 PM IST)`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`Email Service: ${emailService.initialized ? '✅ Enabled' : '❌ Disabled'}`);
+    console.log(`Telegram Service: ${telegramService.configured ? '✅ Enabled' : '❌ Disabled'}`);
     console.log(`${'='.repeat(60)}\n`);
     
+    // Verify Telegram connection on startup
+    if (telegramService.configured) {
+        telegramService.verifyConnection().then((result) => {
+            if (result.success) {
+                console.log(`[TELEGRAM] ${result.message}`);
+            } else {
+                console.error(`[TELEGRAM] Verification failed: ${result.error}`);
+            }
+        }).catch(() => {});
+    }
+
     // Auto-start the trading bot
     if (process.env.BOT_ENABLED !== 'false') {
         setTimeout(() => {
@@ -613,13 +640,12 @@ const server_instance = server.listen(PORT, '0.0.0.0', () => {
             tradingBot.start();
             console.log('[AUTO-START] Gold trading bot is now running!');
             
+            const startupMsg = `GoldForge Bot Started\nTime: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST\nSession: 07:00-17:00 UTC\nLot Size: Fixed 0.01 lot`;
+            
             if (emailService.initialized && process.env.SEND_ERROR_ALERTS === 'true') {
-                emailService.sendAlert(
-                    'Gold Trading Bot Started',
-                    `The XAU/USD trading bot has started.\n\nServer Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST\nSession: 07:00-17:00 UTC\nLot Size: Fixed 0.01 lot (~1 oz)`,
-                    'INFO'
-                );
+                emailService.sendAlert('Gold Trading Bot Started', startupMsg, 'INFO');
             }
+            telegramService.sendMessage(`\u{1F680} ${startupMsg}`);
         }, 2000);
     }
 
