@@ -9,16 +9,15 @@ const BalanceTracker = () => {
     useEffect(() => {
         const fetchData = async () => {
             try {
-                if (loading) setLoading(true);
                 const [balance, price] = await Promise.all([
                     fetchBalance(),
                     fetchPrice()
                 ]);
                 setBalanceData(balance);
                 setCurrentPrice(price.price || 0);
-                setLoading(false);
             } catch (error) {
-                console.error('Error fetching balance data:', error);
+                // ignore polling errors
+            } finally {
                 setLoading(false);
             }
         };
@@ -52,8 +51,8 @@ const BalanceTracker = () => {
     return (
         <div className="balance-container">
             <h2>Balance Tracker</h2>
-            <div className="user-id-small" style={{ fontSize: '0.75em', color: '#64748b', marginBottom: '10px' }}>
-                User: {userId.substring(0, 12)}...
+            <div className="user-id-small terminal-label">
+                Terminal: {userId.substring(5, 17)}...
             </div>
             <div className="balance-details">
                 <div className="balance-item">

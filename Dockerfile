@@ -3,10 +3,10 @@ FROM node:20-alpine
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install --production
+RUN npm install --omit=dev
 
 COPY frontend/package*.json frontend/
-RUN cd frontend && npm install
+RUN cd frontend && npm install --omit=dev
 
 COPY . .
 RUN cd frontend && npm run build

@@ -13,6 +13,7 @@ function App() {
     const [clock, setClock] = useState('');
     const [botOnline, setBotOnline] = useState(false);
     const [apiConnected, setApiConnected] = useState(false);
+    const [chartFocus, setChartFocus] = useState(false);
 
     useEffect(() => {
         const tick = () => {
@@ -56,13 +57,15 @@ function App() {
     }, []);
 
     return (
-        <div className="App">
+        <div className={`App ${chartFocus ? 'chart-focus-mode' : ''}`}>
             <header className="app-header">
                 <div className="header-brand">
-                    <div className="header-logo">GF</div>
+                    <div className="header-logo">
+                        <img src="/goldforge-logo.svg" alt="GoldForge" />
+                    </div>
                     <div>
                         <div className="header-title">GoldForge</div>
-                        <div className="header-subtitle">XAU/USD Automated Terminal</div>
+                        <div className="header-subtitle">XAU/USD Chart Trading Terminal</div>
                     </div>
                 </div>
                 <div className="header-right">
@@ -79,28 +82,54 @@ function App() {
                             {botOnline ? 'BOT LIVE' : 'BOT OFF'}
                         </span>
                     </div>
-                    <div style={{ fontSize: '11px', color: '#94a3b8', minWidth: '140px', textAlign: 'right' }}>
-                        User: {userId.substring(5, 17)}...
+                    <button
+                        type="button"
+                        className={`chart-focus-toggle ${chartFocus ? 'active' : ''}`}
+                        onClick={() => setChartFocus(prev => !prev)}
+                    >
+                        {chartFocus ? 'Full Dashboard' : 'Chart Focus'}
+                    </button>
+                    <div className="terminal-header-pill">
+                        <div className="terminal-header-avatar">G</div>
+                        <div className="terminal-header-copy">
+                            <span>Active Terminal</span>
+                            <strong>{userId.substring(5, 17)}...</strong>
+                        </div>
                     </div>
                 </div>
             </header>
 
-            <main>
-                <div className="dashboard-grid">
-                    <div className="grid-left-column">
-                        <LiveChart />
-                        <BotStatus />
-                        <ActiveTrades />
-                        <ManualTrade />
+            <main className="terminal-main">
+                {chartFocus ? (
+                    <div className="chart-focus-stack">
+                        <LiveChart focusMode={chartFocus} onToggleFocus={() => setChartFocus(prev => !prev)} />
+                        <div className="chart-focus-graphs">
+                            <Backtester />
+                        </div>
                     </div>
-                    <div className="grid-right-column">
-                        <BalanceTracker />
-                        <Backtester />
-                    </div>
-                </div>
-                <div className="full-width-panel">
-                    <TradeJournal />
-                </div>
+                ) : (
+                    <>
+                        <div className="terminal-template-layout">
+                            <div className="terminal-chart-column">
+                                <LiveChart focusMode={chartFocus} onToggleFocus={() => setChartFocus(prev => !prev)} />
+                            </div>
+                            <aside className="terminal-side-column">
+                                <BalanceTracker />
+                                <Backtester />
+                            </aside>
+                        </div>
+
+                        <div className="terminal-lower-grid">
+                            <BotStatus />
+                            <ActiveTrades />
+                            <ManualTrade />
+                        </div>
+
+                        <div className="full-width-panel">
+                            <TradeJournal />
+                        </div>
+                    </>
+                )}
             </main>
         </div>
     );

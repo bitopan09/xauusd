@@ -28,6 +28,11 @@ const db = new sqlite3.Database('./trading.db', (err) => {
     if (err) {
         console.error(err.message);
     }
+    // Enable WAL mode for better concurrent read/write performance
+    db.run('PRAGMA journal_mode=WAL', (err) => {
+        if (err) console.error('Failed to enable WAL mode:', err.message);
+        else console.log('SQLite WAL mode enabled');
+    });
     console.log('Connected to the XAU/USD SQLite database.');
 });
 
@@ -63,13 +68,25 @@ db.serialize(() => {
     exit_timestamp DATETIME,
     trade_type TEXT DEFAULT 'live',
     atr REAL,
-    original_sl REAL
+    original_sl REAL,
+    remaining_quantity REAL,
+    realized_pnl REAL DEFAULT 0,
+    tp1_hit INTEGER DEFAULT 0
   )`);
 
     // Migrate existing databases: add new columns if they don't exist
     db.run(`ALTER TABLE trades ADD COLUMN tp2 REAL`, () => {});
     db.run(`ALTER TABLE trades ADD COLUMN atr REAL`, () => {});
     db.run(`ALTER TABLE trades ADD COLUMN original_sl REAL`, () => {});
+    db.run(`ALTER TABLE trades ADD COLUMN remaining_quantity REAL`, () => {});
+    db.run(`ALTER TABLE trades ADD COLUMN realized_pnl REAL DEFAULT 0`, () => {});
+    db.run(`ALTER TABLE trades ADD COLUMN tp1_hit INTEGER DEFAULT 0`, () => {});
+
+    db.run(`CREATE TABLE IF NOT EXISTS bot_state (
+    key TEXT PRIMARY KEY,
+    state_json TEXT,
+    updated_at DATETIME
+  )`);
 
     db.run(`CREATE TABLE IF NOT EXISTS balance (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,6 +102,12 @@ db.serialize(() => {
             db.run(`INSERT INTO balance (userId, usd_balance, xau_balance) VALUES ('default', 50, 0)`);
         }
     });
+
+    // Performance indexes
+    db.run(`CREATE INDEX IF NOT EXISTS idx_prices_timestamp ON prices(timestamp)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_trades_userId ON trades(userId)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)`);
 
     // Load active trades into memory
     tradingBot.executionEngine.loadOpenTrades();
@@ -200,6 +223,10 @@ const connectBybitWebSocket = () => {
 connectBybitWebSocket();
 
 // REST API endpoints
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
+});
+
 app.get('/api/price', (req, res) => {
     db.get(`SELECT * FROM prices ORDER BY timestamp DESC LIMIT 1`, [], (err, row) => {
         if (err) {
@@ -211,7 +238,7 @@ app.get('/api/price', (req, res) => {
 });
 
 app.get('/api/prices', (req, res) => {
-    const limit = req.query.limit || 100;
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 100, 1), 1000);
     db.all(`SELECT * FROM prices ORDER BY timestamp DESC LIMIT ?`, [limit], (err, rows) => {
         if (err) {
             res.status(500).json({ error: err.message });
@@ -417,6 +444,9 @@ app.post('/api/manual-trade', async (req, res) => {
 app.post('/api/trades/:id/close', async (req, res) => {
     try {
         const tradeId = parseInt(req.params.id);
+        if (!Number.isFinite(tradeId) || tradeId <= 0) {
+            return res.status(400).json({ error: 'Invalid trade ID' });
+        }
         
         db.get('SELECT price FROM prices ORDER BY timestamp DESC LIMIT 1', async (err, row) => {
             if (err || !row) {
@@ -443,7 +473,7 @@ app.get('/api/trades/export', (req, res) => {
         if (err) return res.status(500).send('Error fetching trades');
         if (rows.length === 0) return res.status(404).send('No trades to export');
         
-        const headers = ['ID', 'Date', 'Action', 'Entry Price', 'Exit Price', 'Quantity (oz)', 'Stop Loss', 'Take Profit 1', 'Take Profit 2', 'Status', 'P&L', 'Notes'];
+        const headers = ['ID', 'Date', 'Action', 'Entry Price', 'Exit Price', 'Quantity (lots)', 'Stop Loss', 'Take Profit 1', 'Take Profit 2', 'Status', 'P&L', 'Notes'];
         let csv = headers.join(',') + '\n';
         
         rows.forEach(row => {
@@ -486,8 +516,9 @@ schedule.scheduleJob('0 0 * * *', () => {
     console.log('[' + new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) + '] Daily trade lock reset');
     
     if (process.env.SEND_DAILY_SUMMARY === 'true') {
-        const today = new Date().toISOString().split('T')[0];
-        db.all("SELECT * FROM trades WHERE timestamp LIKE ? AND status = 'CLOSED'", [`${today}%`], (err, rows) => {
+        // Query yesterday's trades (this job runs at midnight, so yesterday just ended)
+        const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+        db.all("SELECT * FROM trades WHERE timestamp LIKE ? AND status = 'CLOSED'", [`${yesterday}%`], (err, rows) => {
             if (rows && rows.length > 0) {
                 const wins = rows.filter(t => t.pnl > 0);
                 emailService.sendDailySummary({
@@ -538,7 +569,7 @@ const server_instance = server.listen(PORT, '0.0.0.0', () => {
     console.log(`Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
     console.log(`Port: ${PORT}`);
     console.log(`Price Feed: Bybit XAUUSDT WebSocket (Real-time)`);
-    console.log(`Lot Size: FIXED 0.01 oz`);
+    console.log(`Lot Size: FIXED 0.01 lot (~1 oz)`);
     console.log(`Session: 07:00-17:00 UTC (12:30 PM-10:30 PM IST)`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`Email Service: ${emailService.initialized ? '✅ Enabled' : '❌ Disabled'}`);
@@ -554,7 +585,7 @@ const server_instance = server.listen(PORT, '0.0.0.0', () => {
             if (emailService.initialized && process.env.SEND_ERROR_ALERTS === 'true') {
                 emailService.sendAlert(
                     'Gold Trading Bot Started',
-                    `The XAU/USD trading bot has started.\n\nServer Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST\nSession: 07:00-17:00 UTC\nLot Size: Fixed 0.01`,
+                    `The XAU/USD trading bot has started.\n\nServer Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST\nSession: 07:00-17:00 UTC\nLot Size: Fixed 0.01 lot (~1 oz)`,
                     'INFO'
                 );
             }
@@ -572,8 +603,8 @@ const server_instance = server.listen(PORT, '0.0.0.0', () => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('\n[SHUTDOWN] Shutting down gracefully...');
+const gracefulShutdown = (signal) => {
+    console.log(`\n[SHUTDOWN] ${signal} received — shutting down gracefully...`);
     tradingBot.stop();
     server_instance.close(() => {
         console.log('[SHUTDOWN] Server closed');
@@ -583,6 +614,13 @@ process.on('SIGINT', () => {
         console.error('[SHUTDOWN] Forced exit due to timeout');
         process.exit(1);
     }, 10000);
+};
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+process.on('unhandledRejection', (reason) => {
+    console.error('[UNHANDLED REJECTION]', reason);
 });
 
 module.exports = { app, server, wss };

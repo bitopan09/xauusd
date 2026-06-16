@@ -31,7 +31,7 @@ const ManualTrade = () => {
                     <label>Quantity (Fixed)</label>
                     <input 
                         type="text" 
-                        value="0.01 oz Gold"
+                        value="0.01 lot Gold (~1 oz)"
                         disabled
                         style={{ opacity: 0.7, cursor: 'not-allowed' }}
                     />

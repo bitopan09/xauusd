@@ -1,4 +1,3 @@
-const sqlite3 = require('sqlite3').verbose();
 const TelegramBot = require('telegram-bot-api');
 const dotenv = require('dotenv');
 const UnifiedStrategy = require('./unifiedStrategy');
@@ -8,7 +7,8 @@ dotenv.config();
 class ExecutionEngine {
     constructor(db) {
         this.db = db;
-        this.FIXED_QUANTITY = 0.01; // Fixed lot — never changes
+        this.FIXED_QUANTITY = Number(process.env.XAU_QUANTITY) || 0.01; // Configurable via env
+        this.MAX_LOSS_PERCENT = Number(process.env.MAX_LOSS_PERCENT) || 5;
         this.strategy = new UnifiedStrategy(); // Single source of truth for trailing stop + exit logic
 
         // Initialize Telegram bot (placeholder)
@@ -41,6 +41,9 @@ class ExecutionEngine {
                             ...row,
                             entryPrice: row.entry_price, // alias for UnifiedStrategy compatibility
                             originalSl: row.original_sl || row.sl,
+                            remainingQuantity: row.remaining_quantity ?? row.quantity,
+                            realizedPnl: row.realized_pnl ?? 0,
+                            tp1Hit: Boolean(row.tp1_hit),
                             atr: row.atr || 15, // fallback ATR for gold 6H
                             timestamp: new Date(row.timestamp)
                         });
@@ -72,7 +75,10 @@ class ExecutionEngine {
             return { success: false, reason: 'Maximum active trades reached (1 trade allowed)' };
         }
 
-        const entryPrice = price || 2400;
+        const entryPrice = price;
+        if (!entryPrice || !Number.isFinite(entryPrice)) {
+            return { success: false, reason: 'No valid price available for trade execution' };
+        }
         const timestamp = new Date();
         const tradeQuantity = this.FIXED_QUANTITY; // Always 0.01
 
@@ -85,14 +91,14 @@ class ExecutionEngine {
         const score = signal.score || 0;
         const notes = signal.notes || '';
 
-        // Enforce max 10% loss rule (tiered doubling)
+        // Enforce max loss rule (tiered doubling)
         const balanceRow = await new Promise((res) => {
             this.db.get("SELECT usd_balance FROM balance WHERE userId = ? ORDER BY timestamp DESC LIMIT 1", [userId], (err, row) => res(row));
         });
         const currentBalance = balanceRow && balanceRow.usd_balance ? balanceRow.usd_balance : 50;
         let base = 50;
         while (base * 2 <= currentBalance) base *= 2;
-        const maxLoss = base * 0.10;
+        const maxLoss = base * (this.MAX_LOSS_PERCENT / 100);
 
         const CONTRACT_SIZE = 100;
         const positionSize = tradeQuantity * CONTRACT_SIZE;
@@ -115,9 +121,9 @@ class ExecutionEngine {
         return new Promise((resolve) => {
             const self = this;
             this.db.run(
-                `INSERT INTO trades (userId, action, entry_price, quantity, timestamp, status, sl, tp1, tp2, score, notes, trade_type, atr, original_sl)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paper', ?, ?)`,
-                [userId, action, entryPrice, tradeQuantity, timestamp.toISOString(), 'OPEN', sl, tp1, tp2, score, notes, atr, originalSl],
+                `INSERT INTO trades (userId, action, entry_price, quantity, timestamp, status, sl, tp1, tp2, score, notes, trade_type, atr, original_sl, remaining_quantity, realized_pnl, tp1_hit)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paper', ?, ?, ?, ?, ?)`,
+                [userId, action, entryPrice, tradeQuantity, timestamp.toISOString(), 'OPEN', sl, tp1, tp2, score, notes, atr, originalSl, tradeQuantity, 0, 0],
                 function (err) {
                     if (err) {
                         console.error('Error logging trade to database:', err);
@@ -135,17 +141,20 @@ class ExecutionEngine {
                         quantity: tradeQuantity,
                         timestamp,
                         status: 'OPEN',
-                        sl, originalSl, tp1, tp2, atr, score, notes
+                        sl, originalSl, tp1, tp2, atr, score, notes,
+                        remainingQuantity: tradeQuantity,
+                        realizedPnl: 0,
+                        tp1Hit: false
                     };
 
                     self.activeTrades.set(tradeId, trade);
 
-                    self._sendAlert(`[${userId}] Gold trade executed: ${action} ${tradeQuantity} oz XAU at $${entryPrice.toFixed(2)} | SL: $${sl.toFixed(2)} | TP1: $${tp1.toFixed(2)} | TP2: $${tp2.toFixed(2)} | ATR: $${atr.toFixed(2)}`);
+                    self._sendAlert(`[${userId}] Gold trade executed: ${action} ${tradeQuantity} lot XAU (~1 oz) at $${entryPrice.toFixed(2)} | SL: $${sl.toFixed(2)} | TP1: $${tp1.toFixed(2)} | TP2: $${tp2.toFixed(2)} | ATR: $${atr.toFixed(2)}`);
 
                     resolve({
                         success: true,
                         trade: trade,
-                        message: `Trade executed: ${action} ${tradeQuantity} oz Gold at $${entryPrice.toFixed(2)}`
+                        message: `Trade executed: ${action} ${tradeQuantity} lot Gold (~1 oz) at $${entryPrice.toFixed(2)}`
                     });
                 }
             );
@@ -180,6 +189,9 @@ class ExecutionEngine {
                 originalSl: trade.originalSl || trade.original_sl || trade.sl,
                 tp1: trade.tp1,
                 tp2: trade.tp2,
+                remainingQuantity: trade.remainingQuantity ?? trade.remaining_quantity ?? trade.quantity,
+                realizedPnl: trade.realizedPnl ?? trade.realized_pnl ?? 0,
+                tp1Hit: trade.tp1Hit || Boolean(trade.tp1_hit),
                 atr: trade.atr || 15 // Fallback ATR for gold 6H
             };
 
@@ -189,11 +201,18 @@ class ExecutionEngine {
 
             // Sync the (possibly trailed) SL back to the live trade
             trade.sl = strategyTrade.sl;
-            if (Math.abs((previousSl || 0) - strategyTrade.sl) > 0.000001 && !exitResult.closed) {
+            trade.remainingQuantity = strategyTrade.remainingQuantity;
+            trade.remaining_quantity = strategyTrade.remainingQuantity;
+            trade.realizedPnl = strategyTrade.realizedPnl;
+            trade.realized_pnl = strategyTrade.realizedPnl;
+            trade.tp1Hit = strategyTrade.tp1Hit;
+            trade.tp1_hit = strategyTrade.tp1Hit ? 1 : 0;
+
+            if (exitResult.partial || (Math.abs((previousSl || 0) - strategyTrade.sl) > 0.000001 && !exitResult.closed)) {
                 this.db.run(
-                    `UPDATE trades SET sl = ? WHERE id = ? AND status = 'OPEN'`,
-                    [strategyTrade.sl, tradeId],
-                    (err) => { if (err) console.error('Error persisting trailing SL:', err); }
+                    `UPDATE trades SET sl = ?, remaining_quantity = ?, realized_pnl = ?, tp1_hit = ? WHERE id = ? AND status = 'OPEN'`,
+                    [strategyTrade.sl, strategyTrade.remainingQuantity, strategyTrade.realizedPnl, strategyTrade.tp1Hit ? 1 : 0, tradeId],
+                    (err) => { if (err) console.error('Error persisting trade management state:', err); }
                 );
             }
 
@@ -211,13 +230,15 @@ class ExecutionEngine {
         if (!trade) return { success: false, reason: 'Trade not in memory' };
 
         const CONTRACT_SIZE = 100;
-        const positionSize = trade.quantity * CONTRACT_SIZE;
+        const remainingQuantity = trade.remainingQuantity ?? trade.remaining_quantity ?? trade.quantity;
+        const positionSize = remainingQuantity * CONTRACT_SIZE;
+        const realizedPnl = trade.realizedPnl ?? trade.realized_pnl ?? 0;
         
         let pnl = 0;
         if (trade.action === 'BUY') {
-            pnl = (exitPrice - trade.entry_price) * positionSize;
+            pnl = realizedPnl + ((exitPrice - trade.entry_price) * positionSize);
         } else {
-            pnl = (trade.entry_price - exitPrice) * positionSize;
+            pnl = realizedPnl + ((trade.entry_price - exitPrice) * positionSize);
         }
 
         trade.exit_price = exitPrice;
@@ -235,9 +256,12 @@ class ExecutionEngine {
              status = ?, 
              exit_reason = ?, 
              exit_timestamp = ?,
-             sl = ?
+             sl = ?,
+             remaining_quantity = ?,
+             realized_pnl = ?,
+             tp1_hit = ?
              WHERE id = ?`,
-            [exitPrice, pnl, 'CLOSED', reason, new Date().toISOString(), trade.sl, tradeId],
+            [exitPrice, pnl, 'CLOSED', reason, new Date().toISOString(), trade.sl, 0, realizedPnl, trade.tp1Hit || trade.tp1_hit ? 1 : 0, tradeId],
             (err) => {
                 if (err) {
                     console.error('Error updating trade in database:', err);
@@ -259,13 +283,13 @@ class ExecutionEngine {
 
         this.activeTrades.delete(tradeId);
 
-        console.log(`Gold trade closed: ${trade.action} ${trade.quantity} oz XAU at $${exitPrice.toFixed(2)}. PnL: $${pnl.toFixed(2)}. Reason: ${reason}`);
+        console.log(`Gold trade closed: ${trade.action} ${trade.quantity} lot XAU at $${exitPrice.toFixed(2)}. PnL: $${pnl.toFixed(2)}. Reason: ${reason}`);
 
         if (this.onTradeClosed) {
             this.onTradeClosed(trade);
         }
 
-        this._sendAlert(`Gold trade closed: ${trade.action} ${trade.quantity} oz XAU at $${exitPrice.toFixed(2)}. PnL: $${pnl.toFixed(2)}. Reason: ${reason}`);
+        this._sendAlert(`Gold trade closed: ${trade.action} ${trade.quantity} lot XAU at $${exitPrice.toFixed(2)}. PnL: $${pnl.toFixed(2)}. Reason: ${reason}`);
 
         return { success: true, trade, pnl, reason };
     }

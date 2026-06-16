@@ -1,7 +1,9 @@
 const AnalysisEngine = require('./analysisEngine');
+const { isUsdNewsBlocked } = require('./newsFilter');
 
 class DecisionEngine {
-    constructor() {
+    constructor(db = null) {
+        this.db = db;
         this.analysisEngine = new AnalysisEngine();
         this.dailyTradeTaken = false;
         this.dailyLossCount = 0;
@@ -9,6 +11,7 @@ class DecisionEngine {
         this.circuitBreakerActive = false;
 
         // Load persistent state
+        this._ensureStateTable();
         this._loadState();
     }
 
@@ -82,23 +85,23 @@ class DecisionEngine {
             };
         }
 
-        // News filter placeholder
-        const newsFilterPassed = true;
+        const newsFilter = isUsdNewsBlocked(now);
 
-        if (!newsFilterPassed) {
+        if (newsFilter.blocked) {
             return {
                 action: 'SKIP',
-                reason: 'News filter blocked trade',
+                reason: `News filter blocked trade: ${newsFilter.reason}`,
                 details: {
                     score: analysis.score,
                     analysis: analysis.details,
-                    newsFilterPassed: false
+                    newsFilterPassed: false,
+                    newsReason: newsFilter.reason
                 }
             };
         }
 
         // Check if score meets the configured strategy threshold
-        const threshold = analysis.details?.confluenceScorer?.threshold ?? 7;
+        const threshold = analysis.details?.confluenceScorer?.threshold ?? 6;
         if (analysis.score < threshold) {
             return {
                 action: 'SKIP',
@@ -164,14 +167,17 @@ class DecisionEngine {
 
     _loadState() {
         try {
-            const state = null;
-            if (state) {
-                const parsed = JSON.parse(state);
+            if (!this.db) return;
+
+            this.db.get(`SELECT state_json FROM bot_state WHERE key = 'decision_engine'`, [], (err, row) => {
+                if (err || !row?.state_json) return;
+
+                const parsed = JSON.parse(row.state_json);
                 this.dailyTradeTaken = parsed.dailyTradeTaken || false;
                 this.dailyLossCount = parsed.dailyLossCount || 0;
                 this.lastTradeDate = parsed.lastTradeDate || null;
                 this.circuitBreakerActive = parsed.circuitBreakerActive || false;
-            }
+            });
         } catch (error) {
             console.error('Error loading state:', error);
         }
@@ -179,10 +185,32 @@ class DecisionEngine {
 
     _saveState() {
         try {
-            // In production, save to database
+            if (!this.db) return;
+
+            const state = JSON.stringify({
+                dailyTradeTaken: this.dailyTradeTaken,
+                dailyLossCount: this.dailyLossCount,
+                lastTradeDate: this.lastTradeDate,
+                circuitBreakerActive: this.circuitBreakerActive
+            });
+
+            this.db.run(
+                `INSERT OR REPLACE INTO bot_state (key, state_json, updated_at) VALUES ('decision_engine', ?, ?)`,
+                [state, new Date().toISOString()]
+            );
         } catch (error) {
             console.error('Error saving state:', error);
         }
+    }
+
+    _ensureStateTable() {
+        if (!this.db) return;
+
+        this.db.run(`CREATE TABLE IF NOT EXISTS bot_state (
+            key TEXT PRIMARY KEY,
+            state_json TEXT,
+            updated_at DATETIME
+        )`);
     }
 }
 

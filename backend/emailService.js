@@ -150,7 +150,7 @@ class EmailService {
                         </tr>
                         <tr>
                             <td style="padding: 10px; border-bottom: 1px solid #e2e8f0; font-weight: bold; color: #2d3748;">Quantity</td>
-                            <td style="padding: 10px; border-bottom: 1px solid #e2e8f0; color: #2d3748;">${trade.quantity || 0.01} oz Gold</td>
+                            <td style="padding: 10px; border-bottom: 1px solid #e2e8f0; color: #2d3748;">${trade.quantity || 0.01} lot Gold (~1 oz)</td>
                         </tr>
                         <tr>
                             <td style="padding: 10px; border-bottom: 1px solid #e2e8f0; font-weight: bold; color: #2d3748;">Stop Loss</td>
@@ -203,7 +203,7 @@ class EmailService {
                         </tr>
                         <tr>
                             <td style="padding: 10px; font-weight: bold; color: #2d3748;">Total P&L</td>
-                            <td style="padding: 10px; color: ${summary.totalPnL >= 0 ? '#10b981' : '#ef4444'}; font-size: 18px; font-weight: bold;">$${summary.totalPnL?.toFixed(2) || '0.00'}</td>
+                            <td style="padding: 10px; color: ${(summary.totalPnl ?? summary.totalPnL ?? 0) >= 0 ? '#10b981' : '#ef4444'}; font-size: 18px; font-weight: bold;">$${(summary.totalPnl ?? summary.totalPnL ?? 0).toFixed(2)}</td>
                         </tr>
                     </table>
                     <p style="margin: 0; font-size: 12px; color: #718096; border-top: 1px solid #e2e8f0; padding-top: 10px;">

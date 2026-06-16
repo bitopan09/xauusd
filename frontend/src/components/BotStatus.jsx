@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
 import { formatTimeIST } from '../utils/timeFormatter';
 import { API_BASE_URL } from '../services/api';
+
+const PUSH_INTERVAL = 60000;
+const STATUS_INTERVAL = 10000;
 
 const BotStatus = () => {
     const [status, setStatus] = useState(null);
@@ -13,7 +15,7 @@ const BotStatus = () => {
         setEmailTesting(true);
         setEmailMessage(null);
         try {
-            await axios.post(`${API_BASE_URL}/email/test`);
+            await fetch(`${API_BASE_URL}/email/test`, { method: 'POST' });
             setEmailMessage({ type: 'success', text: 'Test email triggered successfully! Check your inbox.' });
         } catch (error) {
             setEmailMessage({ type: 'error', text: 'Failed to trigger test email.' });
@@ -25,21 +27,23 @@ const BotStatus = () => {
     useEffect(() => {
         const fetchStatus = async () => {
             try {
-                const response = await axios.get(`${API_BASE_URL}/bot/status`);
-                setStatus(response.data);
-                setLoading(false);
+                const response = await fetch(`${API_BASE_URL}/bot/status`);
+                if (!response.ok) throw new Error('Status fetch failed');
+                const data = await response.json();
+                setStatus(data);
             } catch (error) {
-                console.error('Error fetching bot status:', error);
+                // ignore polling errors
+            } finally {
+                setLoading(false);
             }
         };
 
         fetchStatus();
-        const interval = setInterval(fetchStatus, 10000);
+        const interval = setInterval(fetchStatus, STATUS_INTERVAL);
         return () => clearInterval(interval);
     }, []);
 
     // Push Bybit candle data from browser to backend every 60s
-    // This bypasses Bybit REST API being blocked on Railway's server IPs
     useEffect(() => {
         const pushCandles = async () => {
             try {
@@ -49,8 +53,10 @@ const BotStatus = () => {
                 const json = await response.json();
                 if (!json || json.retCode !== 0 || !json.result?.list) return;
 
-                await axios.post(`${API_BASE_URL}/bot/candles`, {
-                    candles: json.result.list
+                await fetch(`${API_BASE_URL}/bot/candles`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ candles: json.result.list })
                 });
             } catch (err) {
                 // Silent — the bot's own fetch may work on some hosts
@@ -58,7 +64,7 @@ const BotStatus = () => {
         };
 
         pushCandles();
-        const interval = setInterval(pushCandles, 60000);
+        const interval = setInterval(pushCandles, PUSH_INTERVAL);
         return () => clearInterval(interval);
     }, []);
 

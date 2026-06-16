@@ -107,7 +107,7 @@ export const recordTrade = async (tradeData) => {
     }
 };
 
-// WebSocket service for real-time price updates
+// WebSocket service for real-time price updates with reconnection
 export const createPriceWebSocket = (onMessage) => {
     let wsUrl;
     
@@ -118,28 +118,44 @@ export const createPriceWebSocket = (onMessage) => {
         wsUrl = `${protocol}//${window.location.host}`;
     }
 
-    const ws = new WebSocket(wsUrl);
+    let ws = null;
+    let reconnectTimer = null;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_DELAY = 30000;
 
-    ws.onopen = () => {
-        console.log('WebSocket connected to Gold price feed');
+    const connect = () => {
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            reconnectAttempts = 0;
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                onMessage(data);
+            } catch (error) {
+                // Ignore parse errors (pong messages, etc.)
+            }
+        };
+
+        ws.onclose = () => {
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+            reconnectAttempts++;
+            reconnectTimer = setTimeout(connect, delay);
+        };
+
+        ws.onerror = () => {
+            // onclose will handle reconnection
+        };
     };
 
-    ws.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            onMessage(data);
-        } catch (error) {
-            console.error('Error parsing WebSocket message:', error);
+    connect();
+
+    return {
+        close: () => {
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            if (ws) ws.close();
         }
     };
-
-    ws.onclose = () => {
-        console.log('WebSocket disconnected');
-    };
-
-    ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-    };
-
-    return ws;
 };

@@ -1,16 +1,16 @@
-const AnalysisEngine = require('./analysisEngine');
 const DecisionEngine = require('./decisionEngine');
 const ExecutionEngine = require('./executionEngine');
 const emailService = require('./emailService');
 const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
+const { isUsdNewsBlocked } = require('./newsFilter');
 
 class TradingBot {
     constructor(db) {
         this.db = db;
         this.analysisEngine = new AnalysisEngine();
-        this.decisionEngine = new DecisionEngine();
+        this.decisionEngine = new DecisionEngine(this.db);
         this.executionEngine = new ExecutionEngine(this.db);
         
         // Link Execution Engine exits to Decision Engine tracking
@@ -23,13 +23,13 @@ class TradingBot {
         this.isRunning = false;
         this.analysisInterval = null;
         this.priceData = [];
-        this.maxDataPoints = 200;
         this.maxCandleAgeMs = (Number(process.env.MAX_CANDLE_AGE_HOURS) || 8) * 60 * 60 * 1000;
         this.lastCandleSource = null;
         this.lastCandleUpdateTime = null;
         this.lastCandleTimestamp = null;
         this.candleStale = true;
-        this.FIXED_QUANTITY = 0.01; // Fixed lot — never changes
+        this.FIXED_QUANTITY = Number(process.env.XAU_QUANTITY) || 0.01; // Configurable via env
+        this.MAX_LOSS_PERCENT = Number(process.env.MAX_LOSS_PERCENT) || 5;
 
         this._initializePriceData();
     }
@@ -398,10 +398,13 @@ class TradingBot {
 
             const calculateTradePnl = (trade, exitPrice) => {
                 const CONTRACT_SIZE = 100;
-                const positionSize = trade.quantity * CONTRACT_SIZE;
-                return trade.action === 'BUY'
+                const remainingQuantity = trade.remainingQuantity ?? trade.remaining_quantity ?? trade.quantity;
+                const realizedPnl = trade.realizedPnl ?? trade.realized_pnl ?? 0;
+                const positionSize = remainingQuantity * CONTRACT_SIZE;
+                const unrealizedPnl = trade.action === 'BUY'
                     ? (exitPrice - trade.entryPrice) * positionSize
                     : (trade.entryPrice - exitPrice) * positionSize;
+                return realizedPnl + unrealizedPnl;
             };
             
             // Loop through data using UnifiedStrategy
@@ -454,10 +457,10 @@ class TradingBot {
                             let tp1 = analysis.signal === 'BUY' ? rp.takeProfit.tp1Long : rp.takeProfit.tp1Short;
                             let tp2 = analysis.signal === 'BUY' ? rp.takeProfit.tp2Long : rp.takeProfit.tp2Short;
 
-                            // Enforce max 10% loss rule (tiered doubling)
+                            // Enforce max loss rule (tiered doubling)
                             let base = 50;
                             while (base * 2 <= equity) base *= 2;
-                            const maxLoss = base * 0.10;
+                            const maxLoss = base * (this.MAX_LOSS_PERCENT / 100);
 
                             const CONTRACT_SIZE = 100;
                             const positionSize = quantity * CONTRACT_SIZE;
@@ -476,12 +479,21 @@ class TradingBot {
                                     ? currentCandle.open + (cappedSlDistance * uStrategy.TP2_RR)
                                     : currentCandle.open - (cappedSlDistance * uStrategy.TP2_RR);
                             }
+
+                            const newsFilter = isUsdNewsBlocked(currentCandle.timestamp);
+                            if (newsFilter.blocked) {
+                                continue;
+                            }
                             
                             activeTrade = {
                                 id: trades.length + 1,
                                 action: analysis.signal,
                                 entryPrice: currentCandle.open,
                                 quantity,
+                                initialQuantity: quantity,
+                                remainingQuantity: quantity,
+                                realizedPnl: 0,
+                                tp1Hit: false,
                                 sl: sl,
                                 originalSl,
                                 tp1,
@@ -590,7 +602,8 @@ class TradingBot {
                     exitTimestamp: t.exitTimestamp ? t.exitTimestamp.toISOString() : null,
                     action: t.action, entryPrice: t.entryPrice, exitPrice: t.exitPrice,
                     quantity: t.quantity, pnl: t.pnl, sl: t.sl, originalSl: t.originalSl,
-                    tp1: t.tp1, tp2: t.tp2, score: t.score, confluence: t.confluence,
+                    tp1: t.tp1, tp2: t.tp2, remainingQuantity: t.remainingQuantity,
+                    realizedPnl: t.realizedPnl, tp1Hit: t.tp1Hit, score: t.score, confluence: t.confluence,
                     exitReason: t.exitReason
                 }))
             };

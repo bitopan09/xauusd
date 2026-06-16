@@ -5,7 +5,7 @@
   "engines": {
     "node": "20.x"
   },
-  "main": "index.js",
+  "main": "backend/server.js",
   "scripts": {
     "start": "node backend/server.js",
     "build": "cd frontend && npm install && npm run build",

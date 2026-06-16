@@ -89,7 +89,7 @@ The bot uses a **10-factor institutional confluence scoring system**:
 | CHoCH/BOS | Change of Character / Break of Structure |
 | Volume | Volume confirmation |
 
-**Default minimum score: 6/10** to take a trade. You can tune this with `CONFLUENCE_THRESHOLD` after backtesting.
+**Default minimum score: 6/10** to take a trade. The score is weighted by factor quality instead of raw factor count, and you can tune it with `CONFLUENCE_THRESHOLD` after backtesting.
 
 ## ⏰ Trading Session
 
@@ -98,6 +98,8 @@ The bot uses a **10-factor institutional confluence scoring system**:
 | London Open → NY Close | 07:00 – 17:00 | 12:30 PM – 10:30 PM |
 
 This window captures the London session, London-NY overlap, and early NY session — when gold sees **70%+ of its daily volume** and the cleanest institutional price action.
+
+The live strategy analyzes 6H candles, so entries usually occur on the 12:00 UTC candle inside this window. Expanding the session will only matter if you also lower the strategy timeframe.
 
 ## 🐳 Docker Deployment
 
@@ -135,12 +137,13 @@ xauusd/
 
 ## 🔧 Risk Management
 
-- **Dynamic Max Loss (10% Tiered):** Automatically caps the maximum loss to 10% of your account base. It steps up only when your account doubles (e.g., $5 max loss at $50, $10 max loss at $100).
-- **Fixed Lot:** 0.01 oz per trade (never changes).
+- **Dynamic Max Loss (5% Tiered):** Automatically caps the maximum loss to 5% of your account base by default. It steps up only when your account doubles and can be tuned with `MAX_LOSS_PERCENT`.
+- **Fixed Lot:** 0.01 lot per trade, approximately 1 oz notional exposure (never changes).
 - **Daily Trade Limit:** 1 trade per session.
 - **Circuit Breaker:** Stops trading after 2 consecutive losses.
 - **Trailing Stop Loss:** 2R → breakeven, 3.5R → lock 60%, 5R → lock 80%.
-- **Risk-Reward:** TP1 at 1:3, TP2 at 1:5 by default. Tune with `TP1_RR` and `TP2_RR`.
+- **Risk-Reward:** TP1 at 1:3 closes 50% by default, moves SL to breakeven, and lets the runner target TP2 at 1:5. Tune with `TP1_RR`, `TP2_RR`, and `TP1_CLOSE_PERCENT`.
+- **USD News Guard:** Blocks first-Friday NFP risk by default and supports custom UTC news windows with `USD_NEWS_BLOCKS`.
 
 ## 📧 Email Setup (Gmail)
 

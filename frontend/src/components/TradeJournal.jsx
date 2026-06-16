@@ -14,7 +14,6 @@ const TradeJournal = () => {
                 setTrades(data);
                 setLoading(false);
             } catch (error) {
-                console.error('Error fetching trades:', error);
                 setLoading(false);
             }
         };
@@ -54,9 +53,9 @@ const TradeJournal = () => {
                             <th>Action</th>
                             <th>Entry</th>
                             <th>Exit</th>
-                            <th>SL / TP1</th>
+                            <th>SL / TP1 / TP2</th>
                             <th>Status</th>
-                            <th>Qty (oz)</th>
+                            <th>Qty (lots)</th>
                             <th>P&L</th>
                             <th>Notes</th>
                         </tr>
@@ -70,14 +69,15 @@ const TradeJournal = () => {
                                 <td>{trade.exit_price ? '$'+trade.exit_price.toFixed(2) : 'Open'}</td>
                                 <td style={{fontSize: '0.85em'}}>
                                     SL: {trade.sl ? trade.sl.toFixed(2) : '-'} <br/>
-                                    TP: {trade.tp1 ? trade.tp1.toFixed(2) : '-'}
+                                    TP1: {trade.tp1 ? trade.tp1.toFixed(2) : '-'} <br/>
+                                    TP2: {trade.tp2 ? trade.tp2.toFixed(2) : '-'}
                                 </td>
                                 <td><span className={`status-${trade.status?.toLowerCase() || 'open'}`}>{trade.status || 'OPEN'}</span></td>
                                 <td>{trade.quantity}</td>
                                 <td className={trade.pnl >= 0 ? 'profit' : 'loss'}>
                                     {trade.pnl !== null ? '$' + trade.pnl.toFixed(2) : 'Open'}
                                 </td>
-                                <td>{trade.exit_reason || trade.notes || '-'}</td>
+                                <td>{trade.tp1_hit ? 'TP1 partial booked; ' : ''}{trade.exit_reason || trade.notes || '-'}</td>
                             </tr>
                         ))}
                     </tbody>

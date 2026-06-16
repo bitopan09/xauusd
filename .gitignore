@@ -1,9 +1,16 @@
 node_modules/
 .env
+.env.*
+!.env.example
 trading.db
 database.sqlite
 *.db
 frontend/dist/
 .DS_Store
 *.log
+*.zip
 xau_backtest_cache_*.json
+test_proxies.js
+coverage/
+.idea/
+.vscode/

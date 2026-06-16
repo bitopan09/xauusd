@@ -15,9 +15,23 @@ class UnifiedStrategy {
         this.CONFLUENCE_THRESHOLD = numberFromEnv('CONFLUENCE_THRESHOLD', 6); // Minimum score to take a trade
         this.MAX_SCORE = 10;
         this.MIN_DIRECTIONAL_MARGIN = numberFromEnv('MIN_DIRECTIONAL_MARGIN', 1);
-        this.FIXED_QUANTITY = 0.01;  // Fixed lot size — never changes
+        this.FIXED_QUANTITY = Number(process.env.XAU_QUANTITY) || 0.01;  // Configurable via env
         this.TP1_RR = numberFromEnv('TP1_RR', 3);   // 1:3 Risk-Reward for TP1 by default
         this.TP2_RR = numberFromEnv('TP2_RR', 5);   // 1:5 Risk-Reward for TP2 by default
+        this.TP1_CLOSE_PERCENT = numberFromEnv('TP1_CLOSE_PERCENT', 50);
+        this.weights = {
+            trend: numberFromEnv('WEIGHT_TREND', 1.2),
+            rsi: numberFromEnv('WEIGHT_RSI', 0.8),
+            macd: numberFromEnv('WEIGHT_MACD', 1),
+            cpr: numberFromEnv('WEIGHT_CPR', 0.8),
+            vwap: numberFromEnv('WEIGHT_VWAP', 0.8),
+            liquidity: numberFromEnv('WEIGHT_LIQUIDITY', 1.4),
+            wyckoffBonus: numberFromEnv('WEIGHT_WYCKOFF_BONUS', 0.8),
+            ote: numberFromEnv('WEIGHT_OTE', 0.9),
+            obfvg: numberFromEnv('WEIGHT_OBFVG', 1.2),
+            structure: numberFromEnv('WEIGHT_STRUCTURE', 1.3),
+            volume: numberFromEnv('WEIGHT_VOLUME', 0.7)
+        };
     }
 
     /**
@@ -90,7 +104,32 @@ class UnifiedStrategy {
     }
 
     calculateCPR(priceData) {
-        const prevDay = priceData[priceData.length - 2];
+        const currentCandle = priceData[priceData.length - 1];
+        let prevDay = null;
+
+        if (currentCandle?.timestamp) {
+            const currentDate = new Date(currentCandle.timestamp).toISOString().slice(0, 10);
+            const previousCandles = priceData.filter(candle => (
+                candle.timestamp && new Date(candle.timestamp).toISOString().slice(0, 10) < currentDate
+            ));
+            const previousDate = previousCandles.length > 0
+                ? new Date(previousCandles[previousCandles.length - 1].timestamp).toISOString().slice(0, 10)
+                : null;
+
+            if (previousDate) {
+                const dailyCandles = previousCandles.filter(candle => new Date(candle.timestamp).toISOString().slice(0, 10) === previousDate);
+                prevDay = {
+                    high: Math.max(...dailyCandles.map(candle => candle.high || candle.price)),
+                    low: Math.min(...dailyCandles.map(candle => candle.low || candle.price)),
+                    close: dailyCandles[dailyCandles.length - 1].close || dailyCandles[dailyCandles.length - 1].price
+                };
+            }
+        }
+
+        if (!prevDay) {
+            prevDay = priceData[priceData.length - 2];
+        }
+
         const high = prevDay.high || prevDay.price;
         const low = prevDay.low || prevDay.price;
         const close = prevDay.close || prevDay.price;
@@ -101,7 +140,7 @@ class UnifiedStrategy {
         const r1 = (2 * pp) - low;
         const s1 = (2 * pp) - high;
 
-        const currentPrice = priceData[priceData.length - 1].price;
+        const currentPrice = currentCandle.price;
         const distToPP = (currentPrice - pp) / pp;
 
         let signal = 'NEUTRAL';
@@ -302,58 +341,58 @@ class UnifiedStrategy {
         const details = [];
 
         // Factor 1: EMA-50 Trend
-        if (currentPrice > ema50Val && currentPrice > prevPrice) { bullScore++; details.push('Trend ↑'); }
-        else if (currentPrice < ema50Val && currentPrice < prevPrice) { bearScore++; details.push('Trend ↓'); }
+        if (currentPrice > ema50Val && currentPrice > prevPrice) { bullScore += this.weights.trend; details.push('Trend ↑'); }
+        else if (currentPrice < ema50Val && currentPrice < prevPrice) { bearScore += this.weights.trend; details.push('Trend ↓'); }
 
         // Factor 2: RSI Confirmation (tighter, direction-specific ranges)
-        if (rsi > 50 && rsi < 65) { bullScore++; details.push(`RSI: ${rsi.toFixed(1)} (bull zone)`); }
-        else if (rsi > 35 && rsi < 50) { bearScore++; details.push(`RSI: ${rsi.toFixed(1)} (bear zone)`); }
+        if (rsi > 50 && rsi < 65) { bullScore += this.weights.rsi; details.push(`RSI: ${rsi.toFixed(1)} (bull zone)`); }
+        else if (rsi > 35 && rsi < 50) { bearScore += this.weights.rsi; details.push(`RSI: ${rsi.toFixed(1)} (bear zone)`); }
 
         // Factor 3: MACD Confirmation (FIXED: requires meaningful magnitude, not just != 0)
         const macdThreshold = currentPrice * 0.0001; // 0.01% of price = ~$0.44 for gold at $4400
-        if (macd.histogram > macdThreshold) { bullScore++; details.push('MACD bull'); }
-        else if (macd.histogram < -macdThreshold) { bearScore++; details.push('MACD bear'); }
+        if (macd.histogram > macdThreshold) { bullScore += this.weights.macd; details.push('MACD bull'); }
+        else if (macd.histogram < -macdThreshold) { bearScore += this.weights.macd; details.push('MACD bear'); }
 
         // Factor 4: CPR PP Alignment (tighter for gold — 1.5% vs 3% for BTC)
-        if (cpr.signal === 'BULLISH' && Math.abs(cpr.distToPP) < 0.015) { bullScore++; details.push('CPR PP ↑'); }
-        else if (cpr.signal === 'BEARISH' && Math.abs(cpr.distToPP) < 0.015) { bearScore++; details.push('CPR PP ↓'); }
+        if (cpr.signal === 'BULLISH' && Math.abs(cpr.distToPP) < 0.015) { bullScore += this.weights.cpr; details.push('CPR PP ↑'); }
+        else if (cpr.signal === 'BEARISH' && Math.abs(cpr.distToPP) < 0.015) { bearScore += this.weights.cpr; details.push('CPR PP ↓'); }
 
         // Factor 5: VWAP Alignment
-        if (vwap.signal === 'BULLISH') { bullScore++; details.push('VWAP ↑'); }
-        else if (vwap.signal === 'BEARISH') { bearScore++; details.push('VWAP ↓'); }
+        if (vwap.signal === 'BULLISH') { bullScore += this.weights.vwap; details.push('VWAP ↑'); }
+        else if (vwap.signal === 'BEARISH') { bearScore += this.weights.vwap; details.push('VWAP ↓'); }
 
         // Factor 6: Liquidity Sweep / Wyckoff
         if (liquidity.signal === 'BULLISH') {
-            bullScore++;
+            bullScore += this.weights.liquidity;
             details.push(liquidity.isWyckoffConfirmed ? 'Wyckoff ↑' : 'Liq sweep ↑');
-            if (liquidity.isWyckoffConfirmed) { bullScore++; details.push('Wyckoff bonus'); }
+            if (liquidity.isWyckoffConfirmed) { bullScore += this.weights.wyckoffBonus; details.push('Wyckoff bonus'); }
         } else if (liquidity.signal === 'BEARISH') {
-            bearScore++;
+            bearScore += this.weights.liquidity;
             details.push(liquidity.isWyckoffConfirmed ? 'Wyckoff ↓' : 'Liq sweep ↓');
-            if (liquidity.isWyckoffConfirmed) { bearScore++; details.push('Wyckoff bonus'); }
+            if (liquidity.isWyckoffConfirmed) { bearScore += this.weights.wyckoffBonus; details.push('Wyckoff bonus'); }
         }
 
         // Factor 7: OTE Zone (Fibonacci 62-79%)
-        if (ote.signal === 'BULLISH') { bullScore++; details.push('OTE bull'); }
-        else if (ote.signal === 'BEARISH') { bearScore++; details.push('OTE bear'); }
+        if (ote.signal === 'BULLISH') { bullScore += this.weights.ote; details.push('OTE bull'); }
+        else if (ote.signal === 'BEARISH') { bearScore += this.weights.ote; details.push('OTE bear'); }
 
         // Factor 8: Order Block / FVG
-        if (obfvg.signal === 'BULLISH' && obfvg.strength > 2) { bullScore++; details.push('OB/FVG ↑'); }
-        else if (obfvg.signal === 'BEARISH' && obfvg.strength > 2) { bearScore++; details.push('OB/FVG ↓'); }
+        if (obfvg.signal === 'BULLISH' && obfvg.strength > 2) { bullScore += this.weights.obfvg; details.push('OB/FVG ↑'); }
+        else if (obfvg.signal === 'BEARISH' && obfvg.strength > 2) { bearScore += this.weights.obfvg; details.push('OB/FVG ↓'); }
 
         // Factor 9: CHoCH / BOS Structure Break
-        if (structure.signal === 'BULLISH') { bullScore++; details.push('BOS/CHoCH ↑'); }
-        else if (structure.signal === 'BEARISH') { bearScore++; details.push('BOS/CHoCH ↓'); }
+        if (structure.signal === 'BULLISH') { bullScore += this.weights.structure; details.push('BOS/CHoCH ↑'); }
+        else if (structure.signal === 'BEARISH') { bearScore += this.weights.structure; details.push('BOS/CHoCH ↓'); }
 
         // Factor 10: Volume Confirmation (direction-neutral)
         if (recentVol > prevVol * 1.1) {
             // Volume confirms the dominant direction
-            if (bullScore > bearScore) { bullScore++; details.push('Vol confirms ↑'); }
-            else if (bearScore > bullScore) { bearScore++; details.push('Vol confirms ↓'); }
+            if (bullScore > bearScore) { bullScore += this.weights.volume; details.push('Vol confirms ↑'); }
+            else if (bearScore > bullScore) { bearScore += this.weights.volume; details.push('Vol confirms ↓'); }
         }
 
         // The score is the MAX of the two directional scores — conflicting signals DON'T stack
-        const score = Math.min(Math.max(bullScore, bearScore), this.MAX_SCORE);
+        const score = Number(Math.min(Math.max(bullScore, bearScore), this.MAX_SCORE).toFixed(1));
         const scoreMargin = Math.abs(bullScore - bearScore);
         let direction = 'NEUTRAL';
         if (scoreMargin >= this.MIN_DIRECTIONAL_MARGIN) {
@@ -457,36 +496,32 @@ class UnifiedStrategy {
     // Adjusted for gold: tighter thresholds (2R, 3.5R, 5R vs BTC's 2.5R, 4R, 6R)
 
     applyTrailingStop(activeTrade, currentCandle) {
-        // For XAU/USD, 1 standard lot = 100 ounces
-        const CONTRACT_SIZE = 100;
-        const positionSize = activeTrade.quantity * CONTRACT_SIZE;
-
         const initialStop = activeTrade.originalSl ?? activeTrade.original_sl ?? activeTrade.sl;
         const riskDistance = Math.abs(activeTrade.entryPrice - initialStop);
         const fallbackRiskDistance = activeTrade.atr || 15; // Gold ATR ~$15-30 on 6H
-        const riskUnit = positionSize * (riskDistance > 0 ? riskDistance : fallbackRiskDistance);
+        const riskUnit = riskDistance > 0 ? riskDistance : fallbackRiskDistance;
 
         if (activeTrade.action === 'BUY') {
-            const unrealizedPnl = (currentCandle.close - activeTrade.entryPrice) * positionSize;
-            if (unrealizedPnl > riskUnit * 5) {
+            const favorableMove = currentCandle.close - activeTrade.entryPrice;
+            if (favorableMove > riskUnit * 5) {
                 const trailed = activeTrade.entryPrice + (currentCandle.high - activeTrade.entryPrice) * 0.8;
                 activeTrade.sl = Math.max(activeTrade.sl, trailed);
-            } else if (unrealizedPnl > riskUnit * 3.5) {
+            } else if (favorableMove > riskUnit * 3.5) {
                 const trailed = activeTrade.entryPrice + (currentCandle.high - activeTrade.entryPrice) * 0.6;
                 activeTrade.sl = Math.max(activeTrade.sl, trailed);
-            } else if (unrealizedPnl > riskUnit * 2) {
+            } else if (favorableMove > riskUnit * 2) {
                 const be = activeTrade.entryPrice + (currentCandle.high - activeTrade.entryPrice) * 0.1;
                 activeTrade.sl = Math.max(activeTrade.sl, be);
             }
         } else if (activeTrade.action === 'SELL') {
-            const unrealizedPnl = (activeTrade.entryPrice - currentCandle.close) * positionSize;
-            if (unrealizedPnl > riskUnit * 5) {
+            const favorableMove = activeTrade.entryPrice - currentCandle.close;
+            if (favorableMove > riskUnit * 5) {
                 const trailed = activeTrade.entryPrice - (activeTrade.entryPrice - currentCandle.low) * 0.8;
                 activeTrade.sl = Math.min(activeTrade.sl, trailed);
-            } else if (unrealizedPnl > riskUnit * 3.5) {
+            } else if (favorableMove > riskUnit * 3.5) {
                 const trailed = activeTrade.entryPrice - (activeTrade.entryPrice - currentCandle.low) * 0.6;
                 activeTrade.sl = Math.min(activeTrade.sl, trailed);
-            } else if (unrealizedPnl > riskUnit * 2) {
+            } else if (favorableMove > riskUnit * 2) {
                 const be = activeTrade.entryPrice - (activeTrade.entryPrice - currentCandle.low) * 0.1;
                 activeTrade.sl = Math.min(activeTrade.sl, be);
             }
@@ -501,33 +536,73 @@ class UnifiedStrategy {
 
         let exitPrice = null;
         let exitReason = '';
+        const CONTRACT_SIZE = 100;
+        const initialQuantity = activeTrade.initialQuantity || activeTrade.quantity;
+        const remainingQuantity = activeTrade.remainingQuantity ?? activeTrade.remaining_quantity ?? activeTrade.quantity;
+        const realizedPnl = activeTrade.realizedPnl ?? activeTrade.realized_pnl ?? 0;
+        const tp1Hit = activeTrade.tp1Hit || Boolean(activeTrade.tp1_hit);
+
+        const calculatePnl = (price, quantity) => {
+            const positionSize = quantity * CONTRACT_SIZE;
+            return activeTrade.action === 'BUY'
+                ? (price - activeTrade.entryPrice) * positionSize
+                : (activeTrade.entryPrice - price) * positionSize;
+        };
+
+        const closeRemaining = (price, reason) => ({
+            closed: true,
+            exitPrice: price,
+            exitReason: reason,
+            pnl: (activeTrade.realizedPnl ?? activeTrade.realized_pnl ?? 0)
+                + calculatePnl(price, activeTrade.remainingQuantity ?? activeTrade.remaining_quantity ?? remainingQuantity)
+        });
+
+        const takePartial = (price) => {
+            const closePercent = Math.min(Math.max(this.TP1_CLOSE_PERCENT, 0), 100) / 100;
+            const closeQuantity = Math.min(remainingQuantity, initialQuantity * closePercent);
+            const nextRemaining = Math.max(remainingQuantity - closeQuantity, 0);
+            const partialPnl = calculatePnl(price, closeQuantity);
+
+            activeTrade.remainingQuantity = nextRemaining;
+            activeTrade.realizedPnl = realizedPnl + partialPnl;
+            activeTrade.tp1Hit = true;
+            activeTrade.sl = activeTrade.action === 'BUY'
+                ? Math.max(activeTrade.sl, activeTrade.entryPrice)
+                : Math.min(activeTrade.sl, activeTrade.entryPrice);
+
+            return { closed: false, partial: true, exitPrice: price, exitReason: 'TP1 Partial', partialPnl, remainingQuantity: nextRemaining };
+        };
 
         if (activeTrade.action === 'BUY') {
             if (currentCandle.low <= activeTrade.sl) {
-                exitPrice = activeTrade.sl;
-                exitReason = activeTrade.sl >= activeTrade.entryPrice ? 'Trailing SL (BE+)' : 'Stop Loss';
-            } else if (currentCandle.high >= activeTrade.tp1) {
-                exitPrice = activeTrade.tp1;
-                exitReason = 'Take Profit';
+                return closeRemaining(activeTrade.sl, activeTrade.sl >= activeTrade.entryPrice ? 'Trailing SL (BE+)' : 'Stop Loss');
+            }
+            if (!tp1Hit && currentCandle.high >= activeTrade.tp1) {
+                const partialResult = takePartial(activeTrade.tp1);
+                if (activeTrade.tp2 && currentCandle.high >= activeTrade.tp2) {
+                    return closeRemaining(activeTrade.tp2, 'Take Profit 2');
+                }
+                return partialResult;
+            }
+            if ((tp1Hit || activeTrade.tp1Hit) && activeTrade.tp2 && currentCandle.high >= activeTrade.tp2) {
+                return closeRemaining(activeTrade.tp2, 'Take Profit 2');
             }
         } else {
             if (currentCandle.high >= activeTrade.sl) {
-                exitPrice = activeTrade.sl;
-                exitReason = activeTrade.sl <= activeTrade.entryPrice ? 'Trailing SL (BE+)' : 'Stop Loss';
-            } else if (currentCandle.low <= activeTrade.tp1) {
-                exitPrice = activeTrade.tp1;
-                exitReason = 'Take Profit';
+                return closeRemaining(activeTrade.sl, activeTrade.sl <= activeTrade.entryPrice ? 'Trailing SL (BE+)' : 'Stop Loss');
+            }
+            if (!tp1Hit && currentCandle.low <= activeTrade.tp1) {
+                const partialResult = takePartial(activeTrade.tp1);
+                if (activeTrade.tp2 && currentCandle.low <= activeTrade.tp2) {
+                    return closeRemaining(activeTrade.tp2, 'Take Profit 2');
+                }
+                return partialResult;
+            }
+            if ((tp1Hit || activeTrade.tp1Hit) && activeTrade.tp2 && currentCandle.low <= activeTrade.tp2) {
+                return closeRemaining(activeTrade.tp2, 'Take Profit 2');
             }
         }
 
-        if (exitPrice !== null) {
-            const CONTRACT_SIZE = 100;
-            const positionSize = activeTrade.quantity * CONTRACT_SIZE;
-            const pnl = activeTrade.action === 'BUY'
-                ? (exitPrice - activeTrade.entryPrice) * positionSize
-                : (activeTrade.entryPrice - exitPrice) * positionSize;
-            return { closed: true, exitPrice, exitReason, pnl };
-        }
         return { closed: false };
     }
 }

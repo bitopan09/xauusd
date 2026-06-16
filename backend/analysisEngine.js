@@ -25,6 +25,7 @@ class AnalysisEngine {
      * @returns {Object} Analysis results with signal and score
      */
     analyze(priceData) {
+        // Delegate to UnifiedStrategy which enforces its own minimum data check (50 candles)
         if (!priceData || priceData.length < 20) {
             return { signal: 'NEUTRAL', score: 0, details: 'Insufficient data' };
         }
