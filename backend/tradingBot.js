@@ -113,39 +113,35 @@ class TradingBot {
                 const hoursSinceLastFail = (Date.now() - this.lastServerFetchFail) / 3600000;
 
                 if (hoursSinceLastFail > 6) {
-                    const symbol = 'XAUUSDT';
-                    const interval = '360';
-                    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=200`;
+                    let candleData = null;
+                    let source = null;
 
-                    let json;
                     try {
-                        json = await this._fetchBybitData(url);
-
-                        if (!json || json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) {
-                            this.lastServerFetchFail = Date.now();
-                            if (this._first403Logged) {
-                                console.warn('Bybit API still blocked — waiting for browser candle relay');
-                            } else {
-                                console.error('Failed to fetch live XAU candles:', 'Bybit API blocked on cloud (expected) — browser relay will supply candles');
-                                this._first403Logged = true;
-                            }
-                            return;
+                        const json = await this._fetchBybitData(url);
+                        if (json && json.retCode === 0 && json.result?.list?.length) {
+                            candleData = json.result.list;
+                            source = 'bybit_rest';
                         }
+                    } catch { /* try OKX */ }
 
+                    if (!candleData) {
+                        const okx = await this._fetchOKXData();
+                        if (okx && okx.data?.length) {
+                            candleData = okx.data;
+                            source = 'okx';
+                        }
+                    }
+
+                    if (candleData && source) {
                         this.lastServerFetchFail = 0;
-                        this.setPriceData(json.result.list.reverse().map(k => ({
-                            timestamp: new Date(parseInt(k[0])),
-                            open: parseFloat(k[1]),
-                            high: parseFloat(k[2]),
-                            low: parseFloat(k[3]),
-                            close: parseFloat(k[4]),
-                            volume: parseFloat(k[5]),
-                            price: parseFloat(k[4])
-                        })), 'bybit_rest');
-                    } catch (err) {
+                        this.setPriceData(this._parseCandleList(candleData), source);
+                        console.log(`Fetched ${candleData.length} candles from ${source}`);
+                    } else {
                         this.lastServerFetchFail = Date.now();
-                        if (!this._first403Logged) {
-                            console.warn('Bybit server fetch unavailable — browser relay will supply candles');
+                        if (this._first403Logged) {
+                            console.warn('Bybit/OKX blocked — waiting for browser candle relay');
+                        } else {
+                            console.error('Cannot fetch XAU candles from server — browser relay will supply them');
                             this._first403Logged = true;
                         }
                         return;
@@ -635,7 +631,6 @@ class TradingBot {
      * multiple Bybit API mirrors and CORS proxies for blocked cloud IPs (e.g. Railway).
      */
     async _fetchBybitData(url) {
-        // Bybit has multiple official API domains — try them all
         const bybitDomains = [
             'api.bybit.com',
             'api.bytick.com',
@@ -645,7 +640,6 @@ class TradingBot {
         const originalDomain = new URL(url).hostname;
         const errors = [];
 
-        // Phase 1: Try each Bybit domain directly
         for (const domain of bybitDomains) {
             try {
                 const domainUrl = url.replace(originalDomain, domain);
@@ -656,9 +650,6 @@ class TradingBot {
                 if (response.ok) {
                     const json = await response.json();
                     if (json && json.retCode === 0) {
-                        if (domain !== originalDomain) {
-                            console.log(`Bybit fetch succeeded via mirror: ${domain}`);
-                        }
                         return json;
                     }
                 }
@@ -668,35 +659,35 @@ class TradingBot {
             }
         }
 
-        // Phase 2: Try CORS proxies as last resort
-        const proxyTemplates = [
-            (u) => `https://api.codetabs.com/v1/proxy/?quest=${u.replace(/&/g, '%26')}`,
-            (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`
-        ];
+        throw new Error(errors.join(' | '));
+    }
 
-        for (const makeProxy of proxyTemplates) {
-            try {
-                const proxyUrl = makeProxy(url);
-                const response = await fetch(proxyUrl, {
-                    headers: { 'Accept': 'application/json' },
-                    timeout: 15000
-                });
-                if (response.ok) {
-                    const text = await response.text();
-                    if (text && text.trim().startsWith('{')) {
-                        const json = JSON.parse(text);
-                        if (json && json.retCode === 0) {
-                            console.log('Bybit fetch succeeded via CORS proxy');
-                            return json;
-                        }
-                    }
-                }
-            } catch (err) {
-                errors.push(`proxy: ${err.message}`);
-            }
+    async _fetchOKXData() {
+        const url = 'https://www.okx.com/api/v5/market/candles?instId=XAU-USDT-SWAP&bar=6H&limit=200';
+        try {
+            const response = await fetch(url, {
+                headers: { 'Accept': 'application/json' },
+                timeout: 15000
+            });
+            if (!response.ok) return null;
+            const json = await response.json();
+            if (json.code !== '0' || !json.data || json.data.length === 0) return null;
+            return json;
+        } catch {
+            return null;
         }
+    }
 
-        throw new Error(`All Bybit fetch methods failed: ${errors.join(' | ')}`);
+    _parseCandleList(list) {
+        return list.reverse().map(k => ({
+            timestamp: new Date(parseInt(k[0])),
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+            volume: parseFloat(k[5] || 0),
+            price: parseFloat(k[4])
+        }));
     }
 
 
