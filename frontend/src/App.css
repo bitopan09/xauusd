@@ -470,9 +470,14 @@ h2::before {
 
 .trade-details strong { color: var(--text-muted); font-weight: 500; }
 
-.btn-exit {
-  width: 100%;
+.trade-actions {
+  display: flex;
+  gap: 8px;
   margin-top: 14px;
+}
+
+.btn-exit {
+  flex: 1;
   padding: 10px;
   background: rgba(100, 116, 139, 0.15);
   border: 1px solid rgba(100, 116, 139, 0.25);
@@ -496,6 +501,71 @@ h2::before {
 .btn-exit:active {
   transform: translateY(1px);
   background: rgba(239, 68, 68, 0.2);
+}
+
+.partial-close-wrapper {
+  position: relative;
+  flex: 1;
+}
+
+.btn-partial {
+  width: 100%;
+  padding: 10px;
+  background: rgba(212, 175, 55, 0.1);
+  border: 1px solid rgba(212, 175, 55, 0.25);
+  color: #d4af37;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-family: var(--font);
+  transition: all 0.3s;
+}
+
+.btn-partial:hover:not(:disabled) {
+  background: rgba(212, 175, 55, 0.2);
+  border-color: rgba(212, 175, 55, 0.5);
+}
+
+.btn-partial:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.partial-close-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 4px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+
+.partial-close-menu button {
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+
+.partial-close-menu button:hover {
+  background: rgba(212, 175, 55, 0.15);
+  color: #d4af37;
 }
 
 .pnl { font-family: var(--font-mono); font-weight: 700; font-size: 15px; }
@@ -2270,7 +2340,18 @@ textarea {
   .backtester-controls button,
   .btn-buy,
   .btn-sell,
-  .btn-exit {
+  .btn-exit,
+  .btn-partial {
     min-height: 46px;
+  }
+
+  .trade-actions {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .partial-close-menu {
+    flex-direction: row;
+    flex-wrap: wrap;
   }
 }

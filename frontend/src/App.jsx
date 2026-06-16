@@ -1,13 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import './App.css';
 import LiveChart from './components/LiveChart';
 import BalanceTracker from './components/BalanceTracker';
-import TradeJournal from './components/TradeJournal';
-import Backtester from './components/Backtester';
-import ManualTrade from './components/ManualTrade';
-import ActiveTrades from './components/ActiveTrades';
 import BotStatus from './components/BotStatus';
 import { userId } from './services/api';
+
+const Backtester = lazy(() => import('./components/Backtester'));
+const TradeJournal = lazy(() => import('./components/TradeJournal'));
+const ManualTrade = lazy(() => import('./components/ManualTrade'));
+const ActiveTrades = lazy(() => import('./components/ActiveTrades'));
 
 function App() {
     const [clock, setClock] = useState('');
@@ -104,7 +105,9 @@ function App() {
                     <div className="chart-focus-stack">
                         <LiveChart focusMode={chartFocus} onToggleFocus={() => setChartFocus(prev => !prev)} />
                         <div className="chart-focus-graphs">
-                            <Backtester />
+                            <Suspense fallback={<div style={{ padding: '20px', color: '#888', textAlign: 'center' }}>Loading backtester...</div>}>
+                                <Backtester />
+                            </Suspense>
                         </div>
                     </div>
                 ) : (
@@ -115,18 +118,26 @@ function App() {
                             </div>
                             <aside className="terminal-side-column">
                                 <BalanceTracker />
-                                <Backtester />
+                                <Suspense fallback={<div style={{ padding: '20px', color: '#888', textAlign: 'center' }}>Loading backtester...</div>}>
+                                    <Backtester />
+                                </Suspense>
                             </aside>
                         </div>
 
                         <div className="terminal-lower-grid">
                             <BotStatus />
-                            <ActiveTrades />
-                            <ManualTrade />
+                            <Suspense fallback={<div style={{ padding: '20px', color: '#888', textAlign: 'center' }}>Loading trades...</div>}>
+                                <ActiveTrades />
+                            </Suspense>
+                            <Suspense fallback={<div style={{ padding: '20px', color: '#888', textAlign: 'center' }}>Loading manual trade...</div>}>
+                                <ManualTrade />
+                            </Suspense>
                         </div>
 
                         <div className="full-width-panel">
-                            <TradeJournal />
+                            <Suspense fallback={<div style={{ padding: '20px', color: '#888', textAlign: 'center' }}>Loading journal...</div>}>
+                                <TradeJournal />
+                            </Suspense>
                         </div>
                     </>
                 )}

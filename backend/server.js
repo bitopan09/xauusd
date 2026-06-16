@@ -466,6 +466,37 @@ app.post('/api/trades/:id/close', async (req, res) => {
     }
 });
 
+// Partial Close Trade
+app.post('/api/trades/:id/partial-close', async (req, res) => {
+    try {
+        const tradeId = parseInt(req.params.id);
+        if (!Number.isFinite(tradeId) || tradeId <= 0) {
+            return res.status(400).json({ error: 'Invalid trade ID' });
+        }
+
+        const { closePercent } = req.body;
+        if (!closePercent || closePercent <= 0 || closePercent > 100) {
+            return res.status(400).json({ error: 'closePercent must be between 1 and 100' });
+        }
+
+        db.get('SELECT price FROM prices ORDER BY timestamp DESC LIMIT 1', async (err, row) => {
+            if (err || !row) {
+                return res.status(500).json({ error: 'Could not get current gold price' });
+            }
+
+            const result = await tradingBot.executionEngine.manualPartialClose(tradeId, row.price, closePercent);
+
+            if (result.success) {
+                res.json(result);
+            } else {
+                res.status(400).json(result);
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // CSV Export
 app.get('/api/trades/export', (req, res) => {
     const userId = req.query.userId || 'default';

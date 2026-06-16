@@ -350,6 +350,66 @@ class ExecutionEngine {
         }
         return this._closeTrade(tradeId, exitPrice, 'Manual Exit');
     }
+
+    async manualPartialClose(tradeId, exitPrice, closePercent) {
+        let trade = this.activeTrades.get(tradeId);
+
+        if (!trade) {
+            trade = await new Promise((resolve) => {
+                this.db.get("SELECT * FROM trades WHERE id = ? AND status = 'OPEN'", [tradeId], (err, row) => {
+                    if (err || !row) resolve(null);
+                    else {
+                        const t = { ...row, timestamp: new Date(row.timestamp) };
+                        this.activeTrades.set(tradeId, t);
+                        resolve(t);
+                    }
+                });
+            });
+        }
+
+        if (!trade) return { success: false, reason: 'Trade not found or already closed' };
+
+        const CONTRACT_SIZE = 100;
+        const totalQuantity = trade.quantity;
+        const currentRemaining = trade.remainingQuantity ?? trade.remaining_quantity ?? totalQuantity;
+        const closeQty = currentRemaining * (closePercent / 100);
+
+        if (closeQty <= 0) return { success: false, reason: 'Nothing to close' };
+
+        const positionSize = closeQty * CONTRACT_SIZE;
+        const realizedPnl = trade.realizedPnl ?? trade.realized_pnl ?? 0;
+        let pnl = 0;
+        if (trade.action === 'BUY') {
+            pnl = realizedPnl + ((exitPrice - trade.entry_price) * positionSize);
+        } else {
+            pnl = realizedPnl + ((trade.entry_price - exitPrice) * positionSize);
+        }
+
+        const newRemaining = Math.max(0, currentRemaining - closeQty);
+        const tp1Hit = trade.tp1Hit || trade.tp1_hit;
+
+        if (newRemaining <= 0) {
+            return this._closeTrade(tradeId, exitPrice, 'Manual Partial Close (100%)');
+        }
+
+        trade.realizedPnl = pnl;
+        trade.remainingQuantity = newRemaining;
+        trade.remaining_quantity = newRemaining;
+
+        this.db.run(
+            `UPDATE trades SET remaining_quantity = ?, realized_pnl = ?, tp1_hit = ? WHERE id = ?`,
+            [newRemaining, pnl, tp1Hit ? 1 : 0, tradeId],
+            (err) => {
+                if (err) console.error('Error updating partial close:', err);
+            }
+        );
+
+        console.log(`Partial close: ${trade.action} ${closeQty.toFixed(4)} lot XAU at $${exitPrice.toFixed(2)}. Remaining: ${newRemaining.toFixed(4)} lot. PnL: $${pnl.toFixed(2)}`);
+
+        this._sendAlert(`Partial close: ${trade.action} ${closeQty.toFixed(4)} lot XAU at $${exitPrice.toFixed(2)}. Remaining: ${newRemaining.toFixed(4)} lot. PnL: $${pnl.toFixed(2)}`);
+
+        return { success: true, trade, pnl, remainingQuantity: newRemaining, closeQty, reason: 'Manual Partial Close' };
+    }
 }
 
 module.exports = ExecutionEngine;

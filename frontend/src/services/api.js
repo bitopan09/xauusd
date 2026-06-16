@@ -95,6 +95,16 @@ export const closeTrade = async (tradeId) => {
     }
 };
 
+export const partialCloseTrade = async (tradeId, closePercent) => {
+    try {
+        const response = await axios.post(`${API_BASE_URL}/trades/${tradeId}/partial-close`, withUserId({ closePercent }));
+        return response.data;
+    } catch (error) {
+        console.error(`Error partial closing trade ${tradeId}:`, error);
+        throw error.response?.data || error;
+    }
+};
+
 export const exportTradesCsvUrl = `${API_BASE_URL}/trades/export?userId=${userId}`;
 
 export const recordTrade = async (tradeData) => {
