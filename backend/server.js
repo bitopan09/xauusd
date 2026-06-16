@@ -496,29 +496,42 @@ app.post('/api/trades/:id/partial-close', async (req, res) => {
     }
 });
 
+function csvEscape(val) {
+    if (val === null || val === undefined) return '';
+    const s = String(val);
+    if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+        return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+}
+
 // CSV Export
 app.get('/api/trades/export', (req, res) => {
     const userId = req.query.userId || 'default';
     db.all(`SELECT * FROM trades WHERE userId = ? OR userId = 'default' ORDER BY timestamp DESC`, [userId], (err, rows) => {
         if (err) return res.status(500).send('Error fetching trades');
-        if (rows.length === 0) return res.status(404).send('No trades to export');
         
         const headers = ['ID', 'Date', 'Action', 'Entry Price', 'Exit Price', 'Quantity (lots)', 'Stop Loss', 'Take Profit 1', 'Take Profit 2', 'Status', 'P&L', 'Notes'];
-        let csv = headers.join(',') + '\n';
+        const BOM = '\ufeff';
+        let csv = BOM + headers.join(',') + '\n';
         
-        rows.forEach(row => {
-            const cols = [
-                row.id, row.timestamp, row.action,
-                row.entry_price || '', row.exit_price || '',
-                row.quantity || '', row.sl || '',
-                row.tp1 || '', row.tp2 || '',
-                row.status || '', row.pnl || '',
-                (row.notes || '').replace(/,/g, ' ')
-            ];
-            csv += cols.join(',') + '\n';
-        });
+        if (rows.length === 0) {
+            csv += 'No trades found,,,,,,,,,,,\n';
+        } else {
+            rows.forEach(row => {
+                const cols = [
+                    csvEscape(row.id), csvEscape(row.timestamp), csvEscape(row.action),
+                    csvEscape(row.entry_price), csvEscape(row.exit_price),
+                    csvEscape(row.quantity), csvEscape(row.sl),
+                    csvEscape(row.tp1), csvEscape(row.tp2),
+                    csvEscape(row.status), csvEscape(row.pnl),
+                    csvEscape(row.notes)
+                ];
+                csv += cols.join(',') + '\n';
+            });
+        }
         
-        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
         res.setHeader('Content-Disposition', 'attachment; filename=xauusd_trade_journal.csv');
         res.send(csv);
     });
