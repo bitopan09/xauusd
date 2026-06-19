@@ -40,11 +40,11 @@ const normalizeBybitCandle = (k) => ({
 const getSessionState = () => {
     const now = new Date();
     const minutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-    const open = 7 * 60;
-    const close = 17 * 60;
+    const open = 6 * 60;
+    const close = 20 * 60;
 
     if (minutes >= open && minutes <= close) {
-        return { label: 'Gold Session Open', state: 'online' };
+        return { label: 'Session Open', state: 'online' };
     }
 
     return { label: 'Outside Session', state: 'offline' };
@@ -58,6 +58,8 @@ const LiveChart = ({ focusMode = false, onToggleFocus }) => {
     const liveFollowRef = useRef(true);
     const uiFrameRef = useRef(null);
     const pendingUiRef = useRef(null);
+    const lastTickTimeRef = useRef(null);
+    const wsConnectedRef = useRef(false);
 
     const [timeframe, setTimeframe] = useState(TIMEFRAMES[4]);
     const [candles, setCandles] = useState([]);
@@ -68,6 +70,9 @@ const LiveChart = ({ focusMode = false, onToggleFocus }) => {
     const [latencyMs, setLatencyMs] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [candleFresh, setCandleFresh] = useState(true);
+    const [wsConnected, setWsConnected] = useState(false);
+    const [lastTickAge, setLastTickAge] = useState(null);
 
     useEffect(() => {
         liveFollowRef.current = liveFollow;
@@ -204,6 +209,10 @@ const LiveChart = ({ focusMode = false, onToggleFocus }) => {
             const price = Number(payload?.price);
             if (!Number.isFinite(price)) return;
 
+            lastTickTimeRef.current = Date.now();
+            wsConnectedRef.current = true;
+            setWsConnected(true);
+
             const timestampMs = payload.timestamp ? new Date(payload.timestamp).getTime() : Date.now();
             const latency = Number.isFinite(timestampMs) ? Math.max(0, Date.now() - timestampMs) : null;
             const time = bucketTime(timestampMs, timeframe);
@@ -261,6 +270,25 @@ const LiveChart = ({ focusMode = false, onToggleFocus }) => {
         return () => ws.close();
     }, [timeframe]);
 
+    // Staleness checker — runs every 1s, flags candle as stale if no tick in 30s
+    useEffect(() => {
+        const checkStaleness = () => {
+            if (!lastTickTimeRef.current) {
+                setCandleFresh(false);
+                setLastTickAge(null);
+                return;
+            }
+            const ageMs = Date.now() - lastTickTimeRef.current;
+            const ageSec = Math.floor(ageMs / 1000);
+            setLastTickAge(ageSec);
+            setCandleFresh(ageSec < 30);
+        };
+
+        checkStaleness();
+        const interval = setInterval(checkStaleness, 1000);
+        return () => clearInterval(interval);
+    }, []);
+
     const resetChart = () => {
         chartRef.current?.timeScale().fitContent();
     };
@@ -280,10 +308,13 @@ const LiveChart = ({ focusMode = false, onToggleFocus }) => {
                 <div>
                     <h2>XAU/USD {timeframe.label.toUpperCase()}</h2>
                     <div className="live-chart-source">
-                        <span className="live-source-dot"></span>
-                        <span>Bybit Live OHLC</span>
+                        <span className={`live-source-dot ${wsConnected ? 'connected' : 'disconnected'}`}></span>
+                        <span>{wsConnected ? 'Bybit Live' : 'Connecting...'}</span>
                         {displayTime && <span>{formatIst(displayTime)} IST</span>}
-                        <span>{hoveredCandle ? 'Crosshair candle' : 'Latest candle'}</span>
+                        <span>{hoveredCandle ? 'Crosshair' : 'Latest'}</span>
+                        <span className={`freshness-pill ${candleFresh ? 'fresh' : 'stale'}`}>
+                            {candleFresh ? '● LIVE' : `● STALE${lastTickAge !== null ? ` ${lastTickAge}s` : ''}`}
+                        </span>
                         <span className={`session-pill ${sessionState.state}`}>{sessionState.label}</span>
                     </div>
                 </div>

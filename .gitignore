@@ -18,3 +18,27 @@ test_proxies.js
 coverage/
 .idea/
 .vscode/
+
+# Backup files
+*.bak.*
+*.bak
+
+# Test/debug/diagnose scripts
+_test_*
+debug*.js
+diagnose*.js
+determinismTest.js
+testBacktest.js
+
+# Old versions
+*.180bak
+*.test
+
+# Backtest reports and caches
+*_backtest_report*.json
+*_backtest_report*.xlsx
+backtest_*.xlsx
+eurusd_backtest_cache.json
+
+# Backup directories
+backend/backups/

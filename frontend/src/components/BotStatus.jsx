@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { formatTimeIST } from '../utils/timeFormatter';
 import { API_BASE_URL } from '../services/api';
 
-const PUSH_INTERVAL = 60000;
+const PUSH_INTERVAL = 30000;
 const STATUS_INTERVAL = 10000;
 
 const BotStatus = () => {

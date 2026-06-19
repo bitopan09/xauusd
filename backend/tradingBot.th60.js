@@ -10,18 +10,9 @@ class TradingBot {
         this.db = db;
         this.decisionEngine = new DecisionEngine(this.db, {
             lossesPerSession: Number(process.env.LOSSES_PER_SESSION) || 1,
-            maxDailyLosses: Number(process.env.MAX_DAILY_LOSSES) || 2,
-            tp1ClosePercent: Number(process.env.TP1_CLOSE_PERCENT) || 50,
-            maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || 15,
-            confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || 5.5,
-            interval: Number(process.env.BACKTEST_INTERVAL) || 360,
+            maxDailyLosses: Number(process.env.MAX_DAILY_LOSSES) || 2
         });
-        this.executionEngine = new ExecutionEngine(this.db, {
-            tp1ClosePercent: Number(process.env.TP1_CLOSE_PERCENT) || 50,
-            maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || 15,
-            confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || 5.5,
-            interval: Number(process.env.BACKTEST_INTERVAL) || 360,
-        });
+        this.executionEngine = new ExecutionEngine(this.db);
         
         // Link Execution Engine exits to Decision Engine tracking
         this.executionEngine.onTradeClosed = (trade) => {
@@ -230,14 +221,9 @@ class TradingBot {
 
                 // Risk-based position sizing (targets MAX_LOSS_PERCENT of equity per trade)
                 const slDistance = Math.abs(currentPrice - sl);
-                const balanceRow = await new Promise((res) => {
-                    this.db.get("SELECT usd_balance FROM balance WHERE userId = 'default' ORDER BY timestamp DESC LIMIT 1", (err, row) => res(row));
-                });
-                const currentEquity = balanceRow && balanceRow.usd_balance ? balanceRow.usd_balance : 50;
-                const riskAmount = Math.max(1, currentEquity * (this.MAX_LOSS_PERCENT / 100));
-                const CONTRACT_SIZE = 100;
+                const riskAmount = Math.max(1, 50 * (this.MAX_LOSS_PERCENT / 100));
                 const quantity = slDistance > 0
-                    ? Math.max(0.01, Math.min(this.MAX_POSITION_LOTS, Math.round((riskAmount / (slDistance * CONTRACT_SIZE)) * 100) / 100))
+                    ? Math.max(0.01, Math.min(this.MAX_POSITION_LOTS, Math.round((riskAmount / (slDistance * 0.01 * 100)) * 100) / 100))
                     : this.FIXED_QUANTITY;
 
                 const signal = {
@@ -263,12 +249,12 @@ class TradingBot {
                 }
             }
 
-            // Monitor active trades for SL/TP hits using real OHLC candle data
-            const latestCandle = this.priceData[this.priceData.length - 1];
+            // Monitor active trades for SL/TP hits using the latest real-time tick price
             this.db.get('SELECT price FROM prices ORDER BY timestamp DESC LIMIT 1', (err, row) => {
-                const currentPrice = row ? row.price : (latestCandle ? latestCandle.price : null);
-                if (currentPrice) {
-                    this.executionEngine.monitorTrades(currentPrice, latestCandle);
+                if (!err && row) {
+                    this.executionEngine.monitorTrades(row.price);
+                } else {
+                    this.executionEngine.monitorTrades(this.priceData[this.priceData.length - 1].price);
                 }
             });
             
@@ -306,13 +292,12 @@ class TradingBot {
      * @param {string} strategy - Strategy name
      * @param {Array|null} clientCandles - Raw candle arrays from frontend (bypasses server-side fetch)
      */
-    async runBacktest(days = 90, strategy = 'default', clientCandles = null, interval = null, startingCapital = 50) {
+    async runBacktest(days = 90, strategy = 'default', clientCandles = null) {
         const backtestDays = Number.isFinite(Number(days)) && Number(days) > 0 ? Number(days) : 90;
-        const backtestInterval = interval || '360';
-        const intervalMin = parseInt(backtestInterval);
-        const candlesPerDay = intervalMin >= 360 ? 4 : Math.floor(24 * 60 / intervalMin);
-        const warmupCandles = intervalMin <= 30 ? 256 : 150;
+        const candlesPerDay = 4; // 6H candles
+        const warmupCandles = 150;
         const requiredCandles = Math.ceil(backtestDays * candlesPerDay) + warmupCandles;
+        const backtestInterval = '360'; // 6H in minutes
 
         console.log(`Starting XAU/USD backtest for ${backtestDays} days...`);
         
@@ -450,142 +435,143 @@ class TradingBot {
             const lastTs = historicalData[historicalData.length - 1].timestamp.toISOString();
             const dataHash = `${firstTs.slice(0,10)}_${lastTs.slice(0,10)}_${historicalData.length}`;
 
-            // ── MTF: 15m data only when running 6H primary ─────────────────
+            // ── Fetch 15m data for MTF ───────────────────────────────────────
+            const btInterval15 = '15';
+            const cacheFile15 = path.join(__dirname, `xau_backtest_cache_${dateKey}_${btInterval15}.json`);
             let historicalData15m = null;
-            const _15mBy6h = new Map();
-            if (backtestInterval === '360') {
-                const btInterval15 = '15';
-                const cacheFile15 = path.join(__dirname, `xau_backtest_cache_${dateKey}_${btInterval15}.json`);
 
-                // Try cached 15m data first
-                if (fs.existsSync(cacheFile15)) {
+            // Try cached 15m data first
+            if (fs.existsSync(cacheFile15)) {
+                try {
+                    const cached = JSON.parse(fs.readFileSync(cacheFile15, 'utf8'));
+                    if (cached && cached.length > 0) {
+                        historicalData15m = cached.map(k => ({ ...k, timestamp: new Date(k.timestamp) }));
+                        console.log(`✓ Loaded ${historicalData15m.length} cached 15m candles`);
+                    }
+                } catch (e) { console.warn('15m cache read failed:', e.message); }
+            }
+
+            // Fetch 15m from Bybit if not cached
+            if (!historicalData15m) {
+                console.log('Fetching 15m candles for MTF backtest...');
+                let end = anchoredEnd.getTime();
+                let all15m = [];
+                let remaining15 = Math.ceil(requiredCandles * 24); // 24× 15m per 6H
+                while (remaining15 > 0) {
+                    const chunk = Math.min(remaining15, 200);
+                    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=XAUUSDT&interval=${btInterval15}&limit=${chunk}&end=${end}`;
                     try {
-                        const cached = JSON.parse(fs.readFileSync(cacheFile15, 'utf8'));
-                        if (cached && cached.length > 0) {
-                            historicalData15m = cached.map(k => ({ ...k, timestamp: new Date(k.timestamp) }));
-                            console.log(`✓ Loaded ${historicalData15m.length} cached 15m candles`);
-                        }
-                    } catch (e) { console.warn('15m cache read failed:', e.message); }
+                        const json = await this._fetchBybitData(url);
+                        if (!json || json.retCode !== 0 || !json.result?.list?.length) break;
+                        all15m = all15m.concat(json.result.list);
+                        const lastTs = parseInt(json.result.list[json.result.list.length - 1][0]);
+                        end = lastTs;
+                        remaining15 -= chunk;
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                    } catch { break; }
                 }
-
-                // Fetch 15m from Bybit if not cached
-                if (!historicalData15m) {
-                    console.log('Fetching 15m candles for MTF backtest...');
-                    let end = anchoredEnd.getTime();
-                    let all15m = [];
-                    let remaining15 = Math.ceil(requiredCandles * 24); // 24× 15m per 6H
-                    while (remaining15 > 0) {
-                        const chunk = Math.min(remaining15, 200);
-                        const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=XAUUSDT&interval=${btInterval15}&limit=${chunk}&end=${end}`;
-                        try {
-                            const json = await this._fetchBybitData(url);
-                            if (!json || json.retCode !== 0 || !json.result?.list?.length) break;
-                            all15m = all15m.concat(json.result.list);
-                            const lastTs = parseInt(json.result.list[json.result.list.length - 1][0]);
-                            end = lastTs;
-                            remaining15 -= chunk;
-                            await new Promise(resolve => setTimeout(resolve, 200));
-                        } catch { break; }
-                    }
-                    if (all15m.length > 0) {
-                        historicalData15m = all15m.reverse().map(k => ({
-                            timestamp: new Date(parseInt(k[0])),
-                            open: parseFloat(k[1]), high: parseFloat(k[2]),
-                            low: parseFloat(k[3]), close: parseFloat(k[4]),
-                            volume: parseFloat(k[5] || 0), price: parseFloat(k[4])
-                        }));
-                        console.log(`✓ Fetched ${historicalData15m.length} 15m candles from Bybit`);
-                        try { fs.writeFileSync(cacheFile15, JSON.stringify(historicalData15m.map(d => ({ ...d, timestamp: d.timestamp.toISOString() })))); } catch (e) {}
-                    }
-                }
-
-                // Group 15m candles by 6H window
-                if (historicalData15m) {
-                    for (let i6 = 0; i6 < historicalData.length; i6++) {
-                        const c6 = historicalData[i6];
-                        const start6 = c6.timestamp.getTime();
-                        const end6 = start6 + 6 * 3600000;
-                        const sub15 = historicalData15m.filter(c15 =>
-                            c15.timestamp.getTime() >= start6 && c15.timestamp.getTime() < end6
-                        );
-                        if (sub15.length > 0) _15mBy6h.set(i6, sub15);
-                    }
-                    console.log(`✓ Grouped 15m data into ${_15mBy6h.size} 6H windows`);
+                if (all15m.length > 0) {
+                    historicalData15m = all15m.reverse().map(k => ({
+                        timestamp: new Date(parseInt(k[0])),
+                        open: parseFloat(k[1]), high: parseFloat(k[2]),
+                        low: parseFloat(k[3]), close: parseFloat(k[4]),
+                        volume: parseFloat(k[5] || 0), price: parseFloat(k[4])
+                    }));
+                    console.log(`✓ Fetched ${historicalData15m.length} 15m candles from Bybit`);
+                    try { fs.writeFileSync(cacheFile15, JSON.stringify(historicalData15m.map(d => ({ ...d, timestamp: d.timestamp.toISOString() })))); } catch (e) {}
                 }
             }
 
-            // Initialize simulation — unified TradeEngine
+            // Group 15m candles by 6H window
+            const _15mBy6h = new Map();
+            if (historicalData15m) {
+                for (let i6 = 0; i6 < historicalData.length; i6++) {
+                    const c6 = historicalData[i6];
+                    const start6 = c6.timestamp.getTime();
+                    const end6 = start6 + 6 * 3600000;
+                    const sub15 = historicalData15m.filter(c15 =>
+                        c15.timestamp.getTime() >= start6 && c15.timestamp.getTime() < end6
+                    );
+                    if (sub15.length > 0) _15mBy6h.set(i6, sub15);
+                }
+                console.log(`✓ Grouped 15m data into ${_15mBy6h.size} 6H windows`);
+            }
+
+            // Initialize simulation
+            const trades = [];
+            let equity = 50;
+            const initialEquity = 50;
+            const equityCurve = [];
+            let activeTrade = null;
+            let currentTradeDate = null;
+            let dailyLossCount = 0;
+            let lastTradeDate = null;
+            let consecutiveLosses = 0;
+            
+            // Track regime distribution
+            const regimeCounts = { trending: 0, volatile: 0, ranging: 0, unknown: 0 };
+            
             const UnifiedStrategy = require('./unifiedStrategyV3');
             const BrokerSimulation = require('./brokerSimulation');
-            const TradeEngine = require('./tradeEngine');
-
             const uStrategy = new UnifiedStrategy({
                 tp1RR: Number(process.env.TP1_RR) || undefined,
                 tp2RR: Number(process.env.TP2_RR) || undefined,
                 confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || undefined,
                 tp1ClosePercent: Number(process.env.TP1_CLOSE_PERCENT) || undefined,
-                maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || undefined,
-                interval: backtestInterval || 360,
             });
             const broker = new BrokerSimulation();
-            const tradeEngine = new TradeEngine({ strategy: uStrategy, broker, config: {
-                sessionStartMin: 6 * 60,   // 06:00 UTC
-                sessionEndMin: 20 * 60,    // 20:00 UTC
-                maxPositionLots: this.MAX_POSITION_LOTS,
-                fixedQuantity: this.FIXED_QUANTITY,
-            }});
-
-            const trades = [];
-            let equity = startingCapital;
-            const initialEquity = startingCapital;
-            const equityCurve = [];
-            let activeTrade = null;
-            let currentTradeDate = null;
-            let dailyLossCount = 0;
-            let dailyStartEquity = equity;
-            let lastTradeDate = null;
-            let consecutiveLosses = 0;
-            let consecutiveLossCooloff = 0;
-
-            // Track regime distribution
-            const regimeCounts = { trending: 0, volatile: 0, ranging: 0, unknown: 0 };
 
             // Track realistic costs
             let totalSpreadCost = 0;
             let totalSlippageCost = 0;
             let totalCommission = 0;
 
-            // Loop through data using TradeEngine (unified entry/exit/risk logic)
+            const calculateTradePnl = (trade, exitPrice) => {
+                const CONTRACT_SIZE = 100;
+                const remainingQuantity = trade.remainingQuantity ?? trade.remaining_quantity ?? trade.quantity;
+                const realizedPnl = trade.realizedPnl ?? trade.realized_pnl ?? 0;
+                const positionSize = remainingQuantity * CONTRACT_SIZE;
+                // Use broker simulation for mark-to-market exit pricing
+                const slippage = broker.calculateSlippage({
+                    side: trade.action === 'BUY' ? 'SELL' : 'BUY',
+                    candle: trade,
+                    atr: trade.atr,
+                    quantity: remainingQuantity,
+                });
+                const fillPrice = trade.action === 'BUY'
+                    ? exitPrice - slippage * 0.01
+                    : exitPrice + slippage * 0.01;
+                const unrealizedPnl = trade.action === 'BUY'
+                    ? (fillPrice - trade.entryPrice) * positionSize
+                    : (trade.entryPrice - fillPrice) * positionSize;
+                return realizedPnl + unrealizedPnl;
+            };
+            
+            // Loop through data using UnifiedStrategy
             for (let i = 50; i < historicalData.length; i++) {
-                const currentWindow = historicalData.slice(i - 49, i + 1);
+                const currentWindow = historicalData.slice(i - 49, i + 1); // include current candle
                 const currentCandle = historicalData[i];
 
-                // Daily reset
                 const candleDate = currentCandle.timestamp.toISOString().split('T')[0];
                 if (currentTradeDate !== candleDate) {
                     currentTradeDate = candleDate;
                     dailyLossCount = 0;
-                    dailyStartEquity = equity;
                 }
 
-                // Decrement consecutive loss cool-off each candle
-                if (consecutiveLossCooloff > 0) consecutiveLossCooloff--;
-
-                // ── EXIT: Check active trade (shared trailing stop) ──
+                // Check active trade exit
                 if (activeTrade) {
-                    const exitResult = tradeEngine.evaluateExit(activeTrade, currentCandle);
+                    const exitResult = uStrategy.checkTradeExit(activeTrade, currentCandle);
                     if (exitResult.closed) {
                         equity += exitResult.pnl;
+                        // No equity floor — let backtest reflect real losses accurately
                         if (exitResult.pnl < 0) {
                             dailyLossCount++;
                             consecutiveLosses++;
-                            if (consecutiveLosses >= 2) {
-                                consecutiveLossCooloff = Math.min(consecutiveLosses * tradeEngine.COOLOFF_MULTIPLIER, tradeEngine.MAX_COOLOFF);
-                            }
                         } else {
                             consecutiveLosses = 0;
                         }
-                        // Track exit costs (slippage baked into exitResult by checkTradeExit)
+
+                        // Track exit costs (slippage already baked into exitResult.exitPrice by checkTradeExit)
                         const exitSlippage = broker.calculateSlippage({
                             side: activeTrade.action === 'BUY' ? 'SELL' : 'BUY',
                             candle: currentCandle,
@@ -593,6 +579,8 @@ class TradingBot {
                             quantity: activeTrade.remainingQuantity ?? activeTrade.quantity,
                         });
                         totalSlippageCost += exitSlippage * 0.01;
+
+                        // Commission: $7/lot round-turn for ECN
                         const commission = broker.commissionPerLot * activeTrade.quantity;
                         totalCommission += commission;
 
@@ -606,48 +594,105 @@ class TradingBot {
                     }
                 }
 
-                // ── ENTRY: Evaluate new trade (unified 10-step evaluation) ──
+                // New entry with session hour gate (06:00 AM - 8:00 PM UTC = London open to NY close)
                 if (!activeTrade) {
-                    const sub15 = _15mBy6h.get(i);
-                    const entryResult = tradeEngine.evaluateEntry({
-                        currentCandle,
-                        currentWindow,
-                        historicalData,
-                        index: i,
-                        equity,
-                        consecutiveLossCooloff,
-                        dailyLossCount,
-                        sub15mData: sub15 || null,
-                        useMTF: !!(sub15 && sub15.length >= 4),
-                    });
+                    const hour = currentCandle.timestamp.getUTCHours();
+                    const minute = currentCandle.timestamp.getUTCMinutes();
+                    const timeInMinutes = hour * 60 + minute;
+                    const isSessionOpen = (timeInMinutes >= 6 * 60 && timeInMinutes <= 20 * 60);
 
-                    // Track regime classification for ALL evaluated candles
-                    const regimeName = entryResult.analysis?.details?.regime?.regime || 'unknown';
-                    regimeCounts[regimeName] = (regimeCounts[regimeName] || 0) + 1;
+                    if (isSessionOpen && dailyLossCount < 2) {
+                            const sub15 = _15mBy6h.get(i);
+                            const analysis = sub15 && false && sub15.length >= 4
+                                ? uStrategy.analyzeMTF(currentWindow, sub15, {
+                                    sessionStart: currentCandle.timestamp,
+                                    orbCandles: 2,
+                                  })
+                                : uStrategy.analyze(currentWindow);
 
-                    if (entryResult.open) {
-                        // Track entry costs
-                        totalSpreadCost += entryResult.costs.spread / 2 * 0.01;
-                        totalSlippageCost += entryResult.costs.slippage * 0.01;
-                        totalCommission += entryResult.costs.commission;
+                            // Track regime classification
+                            const regimeName = analysis.details?.regime?.regime || 'unknown';
+                            regimeCounts[regimeName] = (regimeCounts[regimeName] || 0) + 1;
 
-                        // Assign trade ID and create active trade
-                        activeTrade = { ...entryResult.trade, id: trades.length + 1 };
-                        lastTradeDate = candleDate;
+                            // MTF pending signals: skip this 6H candle (wait for retest)
+                            if (analysis.signal === 'PENDING_BUY' || analysis.signal === 'PENDING_SELL') {
+                                continue;
+                            }
+
+                            // MTF: map EXECUTE_BUY/EXECUTE_SELL to plain BUY/SELL
+                            const signal = analysis.signal === 'EXECUTE_BUY' ? 'BUY'
+                                         : analysis.signal === 'EXECUTE_SELL' ? 'SELL'
+                                         : analysis.signal;
+
+                            if (signal === 'BUY' || signal === 'SELL') {
+                                const rp = analysis.details.riskCalculator;
+                                let sl = signal === 'BUY' ? rp.stopLoss.long : rp.stopLoss.short;
+                                let originalSl = sl;
+                                let tp1 = signal === 'BUY' ? rp.takeProfit.tp1Long : rp.takeProfit.tp1Short;
+                                let tp2 = signal === 'BUY' ? rp.takeProfit.tp2Long : rp.takeProfit.tp2Short;
+
+                                // Risk-based position sizing: target MAX_LOSS_PERCENT of equity per trade
+                                const entryPrice = analysis.details?.mtf?.entryPrice
+                                    || currentCandle.close || currentCandle.price || currentCandle.c;
+                                const slDistance = Math.abs(entryPrice - sl);
+                                const riskAmount = Math.max(1, equity * (this.MAX_LOSS_PERCENT / 100));
+                                const CONTRACT_SIZE = 100;
+                                const rawQty = slDistance > 0 ? riskAmount / (slDistance * CONTRACT_SIZE) : this.FIXED_QUANTITY;
+                                const quantity = Math.max(0.01, Math.min(this.MAX_POSITION_LOTS, Math.round(rawQty * 100) / 100));
+                                // Use broker simulation for realistic entry fill (includes spread + slippage)
+                                const nextCandle = historicalData[i + 1];
+                                if (!nextCandle) continue;
+                                const entryFillResult = broker.calculateEntryFill(
+                                    signal,
+                                    currentCandle,
+                                    nextCandle,
+                                    { atr: rp.atr, quantity }
+                                );
+                                const entryFill = entryFillResult.fillPrice;
+
+                                const newsFilter = isUsdNewsBlocked(currentCandle.timestamp);
+                                if (newsFilter.blocked) {
+                                    continue;
+                                }
+
+                                // Track entry cost
+                                totalSpreadCost += entryFillResult.spread / 2 * 0.01;
+                                totalSlippageCost += entryFillResult.slippage * 0.01;
+                                totalCommission += entryFillResult.commission;
+                                
+                                activeTrade = {
+                                    id: trades.length + 1,
+                                    action: signal,
+                                    entryPrice: entryFill,
+                                    quantity,
+                                    initialQuantity: quantity,
+                                    remainingQuantity: quantity,
+                                    realizedPnl: 0,
+                                    tp1Hit: false,
+                                    sl: sl,
+                                    originalSl,
+                                    tp1,
+                                    tp2,
+                                    atr: rp.atr,
+                                    score: analysis.score,
+                                    confluence: analysis.details.confluenceScorer?.details || '',
+                                    timestamp: currentCandle.timestamp,
+                                    status: 'OPEN'
+                                };
+                                lastTradeDate = candleDate;
+                            }
+                        }
                     }
-                }
 
-                // Mark to market for equity curve
                 const markedEquity = activeTrade
-                    ? equity + tradeEngine.calculateTradePnl(activeTrade, currentCandle.close)
+                    ? equity + calculateTradePnl(activeTrade, currentCandle.close)
                     : equity;
                 equityCurve.push({ day: equityCurve.length + 1, equity: markedEquity });
             }
 
-            // Force-close any remaining open trade at backtest end
             if (activeTrade) {
                 const finalCandle = historicalData[historicalData.length - 1];
-                const pnl = tradeEngine.calculateTradePnl(activeTrade, finalCandle.close);
+                const pnl = calculateTradePnl(activeTrade, finalCandle.close);
                 equity += pnl;
                 activeTrade.pnl = pnl;
                 activeTrade.exitTimestamp = finalCandle.timestamp;
@@ -715,7 +760,7 @@ class TradingBot {
                     dateRange: `${firstTs.slice(0,10)} to ${lastTs.slice(0,10)}`,
                     anchoredTo: dateKey,
                     requestedDays: backtestDays,
-                    brokerModel: 'OctaFX Standard (40pt spread, 41pt slippage, $0 commission)'
+                    brokerModel: 'ECN (12pt base spread, realistic slippage, $7/lot commission)'
                 },
                 regimeCounts,
                 trades: completedTrades.map(t => ({
@@ -723,13 +768,10 @@ class TradingBot {
                     entryTimestamp: t.timestamp.toISOString(),
                     exitTimestamp: t.exitTimestamp ? t.exitTimestamp.toISOString() : null,
                     action: t.action, entryPrice: t.entryPrice, exitPrice: t.exitPrice,
-                    quantity: t.quantity, pnl: t.pnl,
-                    sl: t.originalSl || t.sl,
-                    originalSl: t.originalSl,
-                    exitSl: t.sl,
+                    quantity: t.quantity, pnl: t.pnl, sl: t.sl, originalSl: t.originalSl,
                     tp1: t.tp1, tp2: t.tp2, remainingQuantity: t.remainingQuantity,
                     realizedPnl: t.realizedPnl, tp1Hit: t.tp1Hit, score: t.score, confluence: t.confluence,
-                    exitReason: t.exitReason, regime: t.regime
+                    exitReason: t.exitReason
                 }))
             };
 

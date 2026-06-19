@@ -1,14 +1,20 @@
 const dotenv = require('dotenv');
-const UnifiedStrategy = require('./unifiedStrategy');
+const UnifiedStrategy = require('./unifiedStrategyV3');
 
 dotenv.config();
 
 class ExecutionEngine {
-    constructor(db) {
+    constructor(db, config = {}) {
         this.db = db;
         this.FIXED_QUANTITY = Number(process.env.XAU_QUANTITY) || 0.01;
-        this.MAX_LOSS_PERCENT = Number(process.env.MAX_LOSS_PERCENT) || 5;
-        this.strategy = new UnifiedStrategy();
+        this.MAX_LOSS_PERCENT = Number(process.env.MAX_LOSS_PERCENT) || 10;
+        this.MAX_POSITION_LOTS = Number(process.env.MAX_POSITION_LOTS) || 0.1;
+        this.strategy = new UnifiedStrategy({
+            tp1ClosePercent: config.tp1ClosePercent ?? (Number(process.env.TP1_CLOSE_PERCENT) || 50),
+            maxSlDistance: config.maxSlDistance ?? (Number(process.env.MAX_SL_DISTANCE) || 15),
+            confluenceThreshold: config.confluenceThreshold ?? (Number(process.env.CONFLUENCE_THRESHOLD) || 5.5),
+            interval: config.interval ?? 360,
+        });
 
         // Active trades tracking
         this.activeTrades = new Map();
@@ -70,8 +76,6 @@ class ExecutionEngine {
             return { success: false, reason: 'No valid price available for trade execution' };
         }
         const timestamp = new Date();
-        const tradeQuantity = this.FIXED_QUANTITY; // Always 0.01
-
         // Use dynamic SL/TP from the signal
         let sl = signal.sl || (action === 'BUY' ? entryPrice - 10 : entryPrice + 10);
         let originalSl = sl;
@@ -81,32 +85,19 @@ class ExecutionEngine {
         const score = signal.score || 0;
         const notes = signal.notes || '';
 
-        // Enforce max loss rule (tiered doubling)
+        // Risk-based position sizing (tiered doubling)
         const balanceRow = await new Promise((res) => {
             this.db.get("SELECT usd_balance FROM balance WHERE userId = ? ORDER BY timestamp DESC LIMIT 1", [userId], (err, row) => res(row));
         });
         const currentBalance = balanceRow && balanceRow.usd_balance ? balanceRow.usd_balance : 50;
         let base = 50;
         while (base * 2 <= currentBalance) base *= 2;
-        const maxLoss = base * (this.MAX_LOSS_PERCENT / 100);
-
+        const riskAmount = Math.max(1, base * (this.MAX_LOSS_PERCENT / 100));
         const CONTRACT_SIZE = 100;
-        const positionSize = tradeQuantity * CONTRACT_SIZE;
-        const maxSlPoints = maxLoss / positionSize;
-
-        const currentSlDistance = Math.abs(entryPrice - sl);
-        if (currentSlDistance > maxSlPoints) {
-            sl = action === 'BUY' ? entryPrice - maxSlPoints : entryPrice + maxSlPoints;
-            originalSl = sl;
-
-            const cappedSlDistance = Math.abs(entryPrice - sl);
-            tp1 = action === 'BUY'
-                ? entryPrice + (cappedSlDistance * this.strategy.TP1_RR)
-                : entryPrice - (cappedSlDistance * this.strategy.TP1_RR);
-            tp2 = action === 'BUY'
-                ? entryPrice + (cappedSlDistance * this.strategy.TP2_RR)
-                : entryPrice - (cappedSlDistance * this.strategy.TP2_RR);
-        }
+        const slDistance = Math.abs(entryPrice - sl);
+        const tradeQuantity = slDistance > 0
+            ? Math.max(0.01, Math.min(this.MAX_POSITION_LOTS, Math.round((riskAmount / (slDistance * CONTRACT_SIZE)) * 100) / 100))
+            : this.FIXED_QUANTITY;
 
         return new Promise((resolve) => {
             const self = this;
@@ -155,22 +146,23 @@ class ExecutionEngine {
      * Monitor active trades for SL/TP hits.
      * UNIFIED: Delegates to UnifiedStrategy.checkTradeExit() — same logic as backtest.
      * @param {number} currentPrice - Current market price
+     * @param {Object|null} currentCandle - Real OHLC candle { open, high, low, close, timestamp }
      */
-    monitorTrades(currentPrice) {
+    monitorTrades(currentPrice, currentCandle = null) {
         for (const [tradeId, trade] of this.activeTrades.entries()) {
             if (trade.status !== 'OPEN') continue;
 
-            // Build a synthetic candle from the tick price for UnifiedStrategy compatibility
-            const entryPrice = trade.entry_price || trade.entryPrice;
-            const currentCandle = {
+            // Use real OHLC candle when available; fall back to synthetic tick candle
+            const candle = currentCandle || {
                 open: currentPrice,
                 high: currentPrice,
                 low: currentPrice,
                 close: currentPrice,
-                price: currentPrice
+                price: currentPrice,
             };
 
             // Normalize trade object for UnifiedStrategy (it expects entryPrice, not entry_price)
+            const entryPrice = trade.entry_price || trade.entryPrice;
             const strategyTrade = {
                 action: trade.action,
                 entryPrice: entryPrice,
@@ -187,7 +179,7 @@ class ExecutionEngine {
 
             // Use the SAME trailing stop + exit logic as the backtest
             const previousSl = trade.sl;
-            const exitResult = this.strategy.checkTradeExit(strategyTrade, currentCandle);
+            const exitResult = this.strategy.checkTradeExit(strategyTrade, candle);
 
             // Sync the (possibly trailed) SL back to the live trade
             trade.sl = strategyTrade.sl;

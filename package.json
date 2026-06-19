@@ -13,7 +13,12 @@
     "dev:frontend": "cd frontend && npm run dev",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["xauusd", "gold", "trading", "bot"],
+  "keywords": [
+    "xauusd",
+    "gold",
+    "trading",
+    "bot"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -24,7 +29,8 @@
     "node-schedule": "^2.1.1",
     "nodemailer": "^8.0.7",
     "sqlite3": "^6.0.1",
-    "ws": "^8.20.0"
+    "ws": "^8.20.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "localtunnel": "^2.0.2"

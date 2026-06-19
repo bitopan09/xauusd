@@ -2,13 +2,22 @@ const AnalysisEngine = require('./analysisEngine');
 const { isUsdNewsBlocked } = require('./newsFilter');
 
 class DecisionEngine {
-    constructor(db = null) {
+    constructor(db = null, config = {}) {
         this.db = db;
-        this.analysisEngine = new AnalysisEngine();
+        this.analysisEngine = new AnalysisEngine({
+            tp1ClosePercent: config.tp1ClosePercent ?? (Number(process.env.TP1_CLOSE_PERCENT) || 50),
+            maxSlDistance: config.maxSlDistance ?? (Number(process.env.MAX_SL_DISTANCE) || 15),
+            confluenceThreshold: config.confluenceThreshold ?? (Number(process.env.CONFLUENCE_THRESHOLD) || 5.5),
+            interval: config.interval ?? (Number(process.env.BACKTEST_INTERVAL) || 360),
+        });
         this.dailyTradeTaken = false;
         this.dailyLossCount = 0;
         this.lastTradeDate = null;
         this.circuitBreakerActive = false;
+        this.sessionLossCount = 0;
+        this.lastSessionLabel = null;
+        this.LOSSES_PER_SESSION = config.lossesPerSession ?? 1;
+        this.MAX_DAILY_LOSSES = config.maxDailyLosses ?? 2;
 
         // Load persistent state
         this._ensureStateTable();
@@ -16,30 +25,60 @@ class DecisionEngine {
     }
 
     /**
+     * Get current session label based on UTC hour.
+     */
+    _getSessionLabel(hour) {
+        if (hour >= 7 && hour < 12) return 'LONDON';
+        if (hour >= 12 && hour < 17) return 'NY';
+        return 'OUTSIDE';
+    }
+
+    /**
      * Make a trading decision based on market analysis
-     * @param {Array} priceData - Historical price data
+     * @param {Array} priceData - Historical price data (6H candles)
      * @returns {Object} Decision result with action and reasoning
      */
     async makeDecision(priceData) {
+        return this._makeDecisionInternal(priceData, null, false);
+    }
+
+    /**
+     * Multi-timeframe decision: 6H confluence × 15m ORB retest.
+     * @param {Array} priceData6h  - 6H candles
+     * @param {Array} priceData15m - 15m candles
+     * @returns {Promise<{action: string, reason: string, details: object}>}
+     */
+    async makeDecisionMTF(priceData6h, priceData15m) {
+        return this._makeDecisionInternal(priceData6h, priceData15m, true);
+    }
+
+    /**
+     * Internal decision logic (shared between single-TF and MTF).
+     */
+    async _makeDecisionInternal(priceData6h, priceData15m = null, useMTF = false) {
         // Reset daily stats if new day
         const today = new Date().toDateString();
         if (this.lastTradeDate !== today) {
             this.dailyTradeTaken = false;
             this.dailyLossCount = 0;
             this.lastTradeDate = today;
+            this.sessionLossCount = 0;
+            this.lastSessionLabel = null;
             this.circuitBreakerActive = false;
             this._saveState();
         }
 
-        // Always perform technical analysis first so the live dashboard has real-time score & indicators
-        const analysis = this.analysisEngine.analyze(priceData);
+        // Always perform technical analysis first
+        const analysis = useMTF
+            ? this.analysisEngine.analyzeMTF(priceData6h, priceData15m)
+            : this.analysisEngine.analyze(priceData6h);
 
-        // Check circuit breaker (2-loss rule)
-        if (this.dailyLossCount >= 2) {
+        // Check circuit breaker (session + daily limits)
+        if (this.dailyLossCount >= this.MAX_DAILY_LOSSES) {
             this.circuitBreakerActive = true;
             return {
                 action: 'SKIP',
-                reason: '2-loss circuit breaker activated',
+                reason: `Daily circuit breaker activated (${this.dailyLossCount}/${this.MAX_DAILY_LOSSES} losses)`,
                 details: {
                     score: analysis.score,
                     analysis: analysis.details,
@@ -63,24 +102,56 @@ class DecisionEngine {
         }
 
         // Session time gate: 07:00 AM to 17:00 PM UTC
-        // = London Open (07:00) through NY Afternoon (17:00)
-        // = 12:30 PM to 10:30 PM IST
-        // This captures London session + London-NY overlap + early NY — the best gold trading window
         const now = new Date();
         const hour = now.getUTCHours();
         const minute = now.getUTCMinutes();
         const timeInMinutes = hour * 60 + minute;
-        const isSessionOpen = (timeInMinutes >= 7 * 60 && timeInMinutes <= 17 * 60); // 07:00 AM - 5:00 PM UTC
+        const isSessionOpen = (timeInMinutes >= 6 * 60 && timeInMinutes <= 20 * 60);
 
         if (!isSessionOpen) {
+            // Allow PENDING signals through even outside hours (they were created during session)
+            if (analysis.signal && analysis.signal.startsWith('PENDING_')) {
+                return {
+                    action: analysis.signal === 'PENDING_BUY' ? 'PENDING_BUY' : 'PENDING_SELL',
+                    reason: analysis.details?.mtf?.mode === 'pending'
+                        ? `Waiting for ORB retest confirmation (expires in ~${analysis.details.mtf.expiresIn}m)`
+                        : 'Pending entry awaiting confirmation',
+                    details: {
+                        score: analysis.score,
+                        analysis: analysis.details,
+                        currentHourUTC: hour,
+                        isMTF: true
+                    }
+                };
+            }
+
             return {
                 action: 'SKIP',
-                reason: 'Outside gold trading session (07:00-17:00 UTC / 12:30 PM-10:30 PM IST)',
+                reason: 'Outside gold trading session (06:00-20:00 UTC)',
                 details: {
                     score: analysis.score,
                     analysis: analysis.details,
                     currentHourUTC: hour,
                     sessionOpen: isSessionOpen
+                }
+            };
+        }
+
+        // Per-session circuit breaker
+        const sessionLabel = this._getSessionLabel(hour);
+        if (sessionLabel !== this.lastSessionLabel) {
+            this.sessionLossCount = 0;
+            this.lastSessionLabel = sessionLabel;
+        }
+        if (this.sessionLossCount >= this.LOSSES_PER_SESSION) {
+            return {
+                action: 'SKIP',
+                reason: `Session circuit breaker: ${sessionLabel} session limit reached (${this.sessionLossCount}/${this.LOSSES_PER_SESSION})`,
+                details: {
+                    score: analysis.score,
+                    analysis: analysis.details,
+                    sessionLossCount: this.sessionLossCount,
+                    sessionLabel,
                 }
             };
         }
@@ -101,7 +172,7 @@ class DecisionEngine {
         }
 
         // Check if score meets the configured strategy threshold
-        const threshold = analysis.details?.confluenceScorer?.threshold ?? 5.5;
+        const threshold = this.analysisEngine.strategy.CONFLUENCE_THRESHOLD;
         if (analysis.score < threshold) {
             return {
                 action: 'SKIP',
@@ -110,6 +181,35 @@ class DecisionEngine {
                     score: analysis.score,
                     threshold,
                     analysis: analysis.details
+                }
+            };
+        }
+
+        // Handle MTF signals
+        if (analysis.signal && analysis.signal.startsWith('PENDING_')) {
+            return {
+                action: analysis.signal === 'PENDING_BUY' ? 'PENDING_BUY' : 'PENDING_SELL',
+                reason: analysis.details?.mtf?.mode === 'pending'
+                    ? `Waiting for ORB retest confirmation (expires in ~${analysis.details.mtf.expiresIn}m)`
+                    : 'Pending entry awaiting confirmation',
+                details: {
+                    score: analysis.score,
+                    analysis: analysis.details,
+                    isMTF: true
+                }
+            };
+        }
+
+        if (analysis.signal === 'EXECUTE_BUY' || analysis.signal === 'EXECUTE_SELL') {
+            return {
+                action: analysis.signal === 'EXECUTE_BUY' ? 'BUY' : 'SELL',
+                reason: 'ORB retest confirmed — executing trade',
+                details: {
+                    score: analysis.score,
+                    analysis: analysis.details,
+                    mtf: analysis.details?.mtf,
+                    entryPrice: analysis.details?.mtf?.entryPrice,
+                    timestamp: new Date().toISOString()
                 }
             };
         }
@@ -151,22 +251,20 @@ class DecisionEngine {
         const entryDate = new Date(tradeResult.timestamp).toDateString();
         const today = new Date().toDateString();
 
-        // Only count towards today's stats if the trade was opened today
         if (entryDate === today) {
             const { pnl } = tradeResult;
 
             if (pnl < 0) {
                 this.dailyLossCount++;
+                this.sessionLossCount++;
             }
 
             this.dailyTradeTaken = true;
             this._saveState();
 
-            if (this.dailyLossCount >= 2) {
+            if (this.dailyLossCount >= this.MAX_DAILY_LOSSES) {
                 this.circuitBreakerActive = true;
             }
-        } else {
-            console.log(`[DecisionEngine] Trade ID ${tradeResult.id} entered on ${entryDate} (not today: ${today}). Skipping daily session lock update.`);
         }
     }
 
@@ -182,6 +280,8 @@ class DecisionEngine {
                 this.dailyLossCount = parsed.dailyLossCount || 0;
                 this.lastTradeDate = parsed.lastTradeDate || null;
                 this.circuitBreakerActive = parsed.circuitBreakerActive || false;
+                this.sessionLossCount = parsed.sessionLossCount || 0;
+                this.lastSessionLabel = parsed.lastSessionLabel || null;
             });
         } catch (error) {
             console.error('Error loading state:', error);
@@ -196,7 +296,9 @@ class DecisionEngine {
                 dailyTradeTaken: this.dailyTradeTaken,
                 dailyLossCount: this.dailyLossCount,
                 lastTradeDate: this.lastTradeDate,
-                circuitBreakerActive: this.circuitBreakerActive
+                circuitBreakerActive: this.circuitBreakerActive,
+                sessionLossCount: this.sessionLossCount,
+                lastSessionLabel: this.lastSessionLabel,
             });
 
             this.db.run(
