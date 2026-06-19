@@ -757,7 +757,18 @@ class TradingBot {
             try {
                 const domainUrl = url.replace(originalDomain, domain);
                 const response = await fetch(domainUrl, {
-                    headers: { 'Accept': 'application/json', 'User-Agent': 'GoldForge/1.0' },
+                    headers: {
+                        'Accept': 'application/json, text/plain, */*',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Connection': 'keep-alive',
+                        'Sec-Fetch-Dest': 'empty',
+                        'Sec-Fetch-Mode': 'cors',
+                        'Sec-Fetch-Site': 'same-site',
+                        'Origin': 'https://www.bybit.com',
+                        'Referer': 'https://www.bybit.com/'
+                    },
                     timeout: 10000
                 });
                 if (response.ok) {
@@ -779,7 +790,13 @@ class TradingBot {
         const url = 'https://www.okx.com/api/v5/market/candles?instId=XAU-USDT-SWAP&bar=6H&limit=200';
         try {
             const response = await fetch(url, {
-                headers: { 'Accept': 'application/json' },
+                headers: {
+                    'Accept': 'application/json, text/plain, */*',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive'
+                },
                 timeout: 15000
             });
             if (!response.ok) return null;

@@ -143,81 +143,107 @@ wss.on('connection', (ws) => {
 // for XAUUSDT ticker updates in real-time.
 // ============================================================
 const connectBybitWebSocket = () => {
-    const bybitWs = new WebSocket('wss://stream.bybit.com/v5/public/linear');
+    // Try multiple WebSocket endpoints for Railway/cloud compatibility
+    const wsUrls = [
+        'wss://stream.bybit.com/v5/public/linear',
+        'wss://stream.bybit.com/v5/public/spot',
+        'wss://stream.bytick.com/v5/public/linear'
+    ];
+    
+    let bybitWs = null;
+    let connected = false;
     let lastDbInsert = Date.now();
     let pingInterval;
 
-    bybitWs.on('open', () => {
-        console.log('✅ Connected to Bybit WebSocket — Real-time XAU/USD feed active');
-        
-        // Subscribe to XAUUSDT ticker for real-time last price
-        bybitWs.send(JSON.stringify({
-            op: 'subscribe',
-            args: ['tickers.XAUUSDT']
-        }));
-
-        // Bybit requires ping every 20 seconds to keep connection alive
-        pingInterval = setInterval(() => {
-            if (bybitWs.readyState === WebSocket.OPEN) {
-                bybitWs.send(JSON.stringify({ op: 'ping' }));
-            }
-        }, 20000);
-    });
-
-    bybitWs.on('message', (data) => {
-        try {
-            const msg = JSON.parse(data);
-            
-            // Skip pong responses, subscription confirmations, and non-ticker messages
-            if (msg.op === 'pong' || msg.op === 'subscribe' || msg.success !== undefined) return;
-            if (!msg.topic || msg.topic !== 'tickers.XAUUSDT' || !msg.data) return;
-
-            const price = parseFloat(msg.data.lastPrice);
-            if (!price || isNaN(price)) return;
-
-            const volume = parseFloat(msg.data.volume24h || 0);
-            const timestamp = new Date(parseInt(msg.ts || Date.now())).toISOString();
-            
-            const priceData = {
-                symbol: 'XAUUSD',
-                price: price,
-                volume: volume,
-                timestamp: timestamp
-            };
-
-            // Broadcast to all connected frontend clients in real-time
-            wss.clients.forEach((client) => {
-                if (client.readyState === WebSocket.OPEN && client !== bybitWs) {
-                    client.send(JSON.stringify({
-                        type: 'price',
-                        data: priceData
-                    }));
-                }
-            });
-
-            // Throttle database inserts to every 1 second
-            if (Date.now() - lastDbInsert >= 1000) {
-                db.run(
-                    `INSERT INTO prices (symbol, price, volume) VALUES (?, ?, ?)`,
-                    ['XAUUSD', price, volume],
-                    (err) => { if (err) console.error('Error inserting gold price:', err); }
-                );
-                lastDbInsert = Date.now();
-            }
-        } catch (err) {
-            // Silently ignore parse errors for non-JSON messages (like pong)
+    const tryConnect = (index = 0) => {
+        if (index >= wsUrls.length) {
+            console.error('[BYBIT WS] All endpoints failed, retrying in 10s...');
+            setTimeout(() => tryConnect(0), 10000);
+            return;
         }
-    });
 
-    bybitWs.on('close', () => {
-        console.log('Bybit WebSocket closed, reconnecting in 3s...');
-        if (pingInterval) clearInterval(pingInterval);
-        setTimeout(connectBybitWebSocket, 3000);
-    });
+        const url = wsUrls[index];
+        console.log(`[BYBIT WS] Connecting to ${url}...`);
+        
+        bybitWs = new WebSocket(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Origin': 'https://www.bybit.com'
+            }
+        });
 
-    bybitWs.on('error', (err) => {
-        console.error('Bybit WebSocket error:', err.message);
-    });
+        bybitWs.on('open', () => {
+            connected = true;
+            console.log(`✅ Connected to Bybit WebSocket — ${url}`);
+            
+            bybitWs.send(JSON.stringify({
+                op: 'subscribe',
+                args: ['tickers.XAUUSDT']
+            }));
+
+            pingInterval = setInterval(() => {
+                if (bybitWs && bybitWs.readyState === WebSocket.OPEN) {
+                    bybitWs.send(JSON.stringify({ op: 'ping' }));
+                }
+            }, 20000);
+        });
+
+        bybitWs.on('message', (data) => {
+            try {
+                const msg = JSON.parse(data);
+                if (msg.op === 'pong' || msg.op === 'subscribe' || msg.success !== undefined) return;
+                if (!msg.topic || msg.topic !== 'tickers.XAUUSDT' || !msg.data) return;
+
+                const price = parseFloat(msg.data.lastPrice);
+                if (!price || isNaN(price)) return;
+
+                const volume = parseFloat(msg.data.volume24h || 0);
+                const timestamp = new Date(parseInt(msg.ts || Date.now())).toISOString();
+                
+                const priceData = {
+                    symbol: 'XAUUSD',
+                    price: price,
+                    volume: volume,
+                    timestamp: timestamp
+                };
+
+                wss.clients.forEach((client) => {
+                    if (client.readyState === WebSocket.OPEN && client !== bybitWs) {
+                        client.send(JSON.stringify({
+                            type: 'price',
+                            data: priceData
+                        }));
+                    }
+                });
+
+                if (Date.now() - lastDbInsert >= 1000) {
+                    db.run(
+                        `INSERT INTO prices (symbol, price, volume) VALUES (?, ?, ?)`,
+                        ['XAUUSD', price, volume],
+                        (err) => { if (err) console.error('Error inserting gold price:', err); }
+                    );
+                    lastDbInsert = Date.now();
+                }
+            } catch (err) {
+                // Silently ignore parse errors
+            }
+        });
+
+        bybitWs.on('close', () => {
+            connected = false;
+            console.log(`[BYBIT WS] ${url} closed, trying next endpoint...`);
+            if (pingInterval) clearInterval(pingInterval);
+            setTimeout(() => tryConnect(index + 1), 3000);
+        });
+
+        bybitWs.on('error', (err) => {
+            console.error(`[BYBIT WS] Error on ${url}:`, err.message);
+            if (pingInterval) clearInterval(pingInterval);
+            if (!connected) tryConnect(index + 1);
+        });
+    };
+
+    tryConnect(0);
 };
 
 connectBybitWebSocket();
