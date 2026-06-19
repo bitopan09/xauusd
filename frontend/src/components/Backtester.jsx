@@ -21,23 +21,52 @@ const Backtester = () => {
     const [backtestDays, setBacktestDays] = useState(DEFAULT_BACKTEST_DAYS);
     const [activePreset, setActivePreset] = useState(90);
 
+    const fetchCandlesFromBrowser = async (days) => {
+        // 6H candles: 4 per day + 150 warmup candles
+        const required = Math.ceil(days * 4) + 150;
+        const limit = Math.min(required, 1000);
+        const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=XAUUSDT&interval=360&limit=${limit}`;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Bybit API: ${response.status}`);
+        const json = await response.json();
+        if (json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) {
+            throw new Error('Bybit API returned no candle data');
+        }
+        return json.result.list; // [[timestamp, open, high, low, close, volume, turnover], ...]
+    };
+
     const runBacktest = async () => {
         setIsRunning(true);
         setError(null);
         setProgressPct(10);
-        setProgress('Running V4-Plus backtest with DD risk management...');
+        setProgress('Fetching candle data from browser...');
         try {
-            setProgressPct(30);
-            setProgress('Loading market data & running strategy...');
+            setProgressPct(20);
+            setProgress('Fetching 6H candles from Bybit (browser-side)...');
+
+            let candles;
+            try {
+                candles = await fetchCandlesFromBrowser(backtestDays);
+                setProgressPct(40);
+                setProgress(`Got ${candles.length} candles from browser. Running backtest...`);
+            } catch (candleErr) {
+                console.warn('Browser candle fetch failed:', candleErr.message);
+                setProgressPct(30);
+                setProgress('Browser fetch failed, trying server fallback...');
+                candles = null;
+            }
+
+            setProgressPct(50);
+            setProgress('Running V4-Plus backtest with DD risk management...');
 
             const response = await fetch(`${API_BASE_URL}/full-backtest`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ days: backtestDays })
+                body: JSON.stringify({ days: backtestDays, candles })
             });
 
             setProgressPct(80);
-            setProgress('Calculating risk metrics...');
+            setProgress('Calculating risk metrics & progressive sizing...');
 
             if (!response.ok) {
                 const errBody = await response.json().catch(() => ({}));
@@ -182,7 +211,7 @@ const Backtester = () => {
                 <div className="backtester-results">
                     {results.dataInfo && (
                         <div className="backtest-data-info">
-                            <span>Source: {results.dataInfo.source === 'cache' ? 'Cached (YFinance)' : 'Live'}</span>
+                            <span>Source: {results.dataInfo.source === 'client_browser' ? 'Browser (Bybit)' : results.dataInfo.source === 'cache' ? 'Cached' : 'Live (Server)'}</span>
                             <span>Candles: {results.dataInfo.candleCount}</span>
                             <span>Range: {results.dataInfo.dateRange}</span>
                         </div>

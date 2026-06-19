@@ -426,6 +426,7 @@ app.post('/api/full-backtest', async (req, res) => {
         const { days, strategy, userId, candles } = req.body;
         const backtestDays = days || 90;
         console.log(`Running FULL V4-Plus backtest for ${backtestDays} days with DD risk management...`);
+        console.log(`Client candles received: ${candles ? candles.length : 'none'}`);
 
         // Set strategy parameters
                     process.env.CONFLUENCE_THRESHOLD = '5.5';
