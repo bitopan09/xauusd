@@ -138,67 +138,46 @@ wss.on('connection', (ws) => {
 });
 
 // ============================================================
-// BYBIT WEBSOCKET — Real-time XAU/USD Price Feed (NO DELAY)
-// Connects to Bybit's public linear perpetual WebSocket
-// for XAUUSDT ticker updates in real-time.
+// BINANCE WEBSOCKET — Real-time XAU/USD Price Feed (NO DELAY)
+// Connects to Binance's public futures WebSocket for XAUUSDT ticker updates.
+// Binance does not block cloud server IPs like Bybit does.
 // ============================================================
 const connectBybitWebSocket = () => {
-    // Try multiple WebSocket endpoints for Railway/cloud compatibility
-    const wsUrls = [
-        'wss://stream.bybit.com/v5/public/linear',
-        'wss://stream.bybit.com/v5/public/spot',
-        'wss://stream.bytick.com/v5/public/linear'
-    ];
-    
-    let bybitWs = null;
-    let connected = false;
+    // Binance WebSocket — works from cloud servers (unlike Bybit)
+    const wsUrl = 'wss://fstream.binance.com/ws/xauusdt@ticker';
     let lastDbInsert = Date.now();
     let pingInterval;
+    let reconnectTimeout;
 
-    const tryConnect = (index = 0) => {
-        if (index >= wsUrls.length) {
-            console.error('[BYBIT WS] All endpoints failed, retrying in 10s...');
-            setTimeout(() => tryConnect(0), 10000);
-            return;
-        }
-
-        const url = wsUrls[index];
-        console.log(`[BYBIT WS] Connecting to ${url}...`);
+    const connect = () => {
+        console.log(`[WS] Connecting to ${wsUrl}...`);
         
-        bybitWs = new WebSocket(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                'Origin': 'https://www.bybit.com'
-            }
-        });
+        const ws = new WebSocket(wsUrl);
 
-        bybitWs.on('open', () => {
-            connected = true;
-            console.log(`✅ Connected to Bybit WebSocket — ${url}`);
+        ws.on('open', () => {
+            console.log('✅ Connected to Binance WebSocket — Real-time XAU/USD feed active');
             
-            bybitWs.send(JSON.stringify({
-                op: 'subscribe',
-                args: ['tickers.XAUUSDT']
-            }));
-
+            // Binance requires pong frame keepalive, handled automatically by ws library
+            // But we send ping every 25s for safety
             pingInterval = setInterval(() => {
-                if (bybitWs && bybitWs.readyState === WebSocket.OPEN) {
-                    bybitWs.send(JSON.stringify({ op: 'ping' }));
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    try { ws.ping(); } catch {}
                 }
-            }, 20000);
+            }, 25000);
         });
 
-        bybitWs.on('message', (data) => {
+        ws.on('message', (data) => {
             try {
                 const msg = JSON.parse(data);
-                if (msg.op === 'pong' || msg.op === 'subscribe' || msg.success !== undefined) return;
-                if (!msg.topic || msg.topic !== 'tickers.XAUUSDT' || !msg.data) return;
+                
+                // Binance ticker format: {"s":"XAUUSDT","c":"4160.50","v":"12345.67",...}
+                if (msg.s !== 'XAUUSDT') return;
 
-                const price = parseFloat(msg.data.lastPrice);
+                const price = parseFloat(msg.c);
                 if (!price || isNaN(price)) return;
 
-                const volume = parseFloat(msg.data.volume24h || 0);
-                const timestamp = new Date(parseInt(msg.ts || Date.now())).toISOString();
+                const volume = parseFloat(msg.v || 0);
+                const timestamp = new Date().toISOString();
                 
                 const priceData = {
                     symbol: 'XAUUSD',
@@ -208,7 +187,7 @@ const connectBybitWebSocket = () => {
                 };
 
                 wss.clients.forEach((client) => {
-                    if (client.readyState === WebSocket.OPEN && client !== bybitWs) {
+                    if (client.readyState === WebSocket.OPEN) {
                         client.send(JSON.stringify({
                             type: 'price',
                             data: priceData
@@ -229,21 +208,21 @@ const connectBybitWebSocket = () => {
             }
         });
 
-        bybitWs.on('close', () => {
-            connected = false;
-            console.log(`[BYBIT WS] ${url} closed, trying next endpoint...`);
+        ws.on('close', () => {
+            console.log('[WS] Binance WebSocket closed, reconnecting in 3s...');
             if (pingInterval) clearInterval(pingInterval);
-            setTimeout(() => tryConnect(index + 1), 3000);
+            reconnectTimeout = setTimeout(connect, 3000);
         });
 
-        bybitWs.on('error', (err) => {
-            console.error(`[BYBIT WS] Error on ${url}:`, err.message);
+        ws.on('error', (err) => {
+            console.error('[WS] Binance WebSocket error:', err.message);
             if (pingInterval) clearInterval(pingInterval);
-            if (!connected) tryConnect(index + 1);
         });
+
+        return ws;
     };
 
-    tryConnect(0);
+    return connect();
 };
 
 connectBybitWebSocket();
@@ -368,8 +347,8 @@ app.get('/api/bot/status', async (req, res) => {
     }
 });
 
-// Frontend pushes Bybit candle data so the live bot can analyze
-// even when Bybit REST API is blocked on Railway
+// Frontend pushes candle data so the live bot can analyze
+// even when candle APIs are blocked on cloud servers
 app.post('/api/bot/candles', async (req, res) => {
     try {
         const { candles } = req.body;
@@ -397,7 +376,7 @@ app.post('/api/bot/candles', async (req, res) => {
             return res.status(400).json({ error: 'Malformed candle data provided' });
         }
 
-        // Parse raw Bybit candle format to the structure the bot expects
+        // Parse raw candle format to the structure the bot expects
         const sorted = [...candles].sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
         const priceData = sorted.map(k => ({
             timestamp: new Date(parseInt(k[0])),
@@ -814,7 +793,7 @@ const server_instance = server.listen(PORT, '0.0.0.0', () => {
     console.log(`🥇 GoldForge — XAU/USD Trading Bot Server Started`);
     console.log(`Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
     console.log(`Port: ${PORT}`);
-    console.log(`Price Feed: Bybit XAUUSDT WebSocket (Real-time)`);
+    console.log(`Price Feed: Binance XAUUSDT WebSocket (Real-time)`);
     console.log(`Lot Size: FIXED 0.01 lot (~1 oz)`);
     console.log(`Session: 07:00-17:00 UTC (12:30 PM-10:30 PM IST)`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);

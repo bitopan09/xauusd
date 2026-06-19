@@ -51,7 +51,7 @@ class TradingBot {
      * Initialize price data — starts empty, populated by first successful API call
      */
     _initializePriceData() {
-        // No seed data — priceData is populated by _analyzeAndTrade() with real Bybit candles
+        // No seed data — priceData is populated by _analyzeAndTrade() with real candles
     }
 
     setPriceData(priceData, source = 'unknown') {
@@ -121,7 +121,7 @@ class TradingBot {
 
     /**
      * Main analysis and trading loop
-     * Fetches 6H candles from Bybit for XAUUSDT and runs confluence scoring.
+     * Fetches 6H candles from Binance/OKX for XAUUSDT and runs confluence scoring.
      * If priceData was pre-populated (e.g. by /api/bot/candles), skip the fetch.
      */
     async _analyzeAndTrade() {
@@ -138,15 +138,16 @@ class TradingBot {
                     let candleData15m = null;
                     let source = null;
 
+                    // Try Binance Futures first (works from cloud servers)
                     try {
-                        const bybitUrl = 'https://api.bybit.com/v5/market/kline?category=linear&symbol=XAUUSDT&interval=360&limit=200';
-                        const json = await this._fetchBybitData(bybitUrl);
-                        if (json && json.retCode === 0 && json.result?.list?.length) {
-                            candleData = json.result.list;
-                            source = 'bybit_rest';
+                        const json = await this._fetchBinanceKlines('6h', 200);
+                        if (json && json.length) {
+                            candleData = json;
+                            source = 'binance';
                         }
                     } catch { /* try OKX */ }
 
+                    // Fallback to OKX
                     if (!candleData) {
                         const okx = await this._fetchOKXData();
                         if (okx && okx.data?.length) {
@@ -155,27 +156,33 @@ class TradingBot {
                         }
                     }
 
-                    // Also fetch 15m candles for MTF
+                    // Fetch 15m candles for MTF
                     try {
-                        const bybitUrl15m = 'https://api.bybit.com/v5/market/kline?category=linear&symbol=XAUUSDT&interval=15&limit=200';
-                        const json15m = await this._fetchBybitData(bybitUrl15m);
-                        if (json15m && json15m.retCode === 0 && json15m.result?.list?.length) {
-                            candleData15m = json15m.result.list;
+                        const json15m = await this._fetchBinanceKlines('15m', 200);
+                        if (json15m && json15m.length) {
+                            candleData15m = json15m;
                         }
                     } catch { /* 15m fetch optional */ }
 
                     if (candleData && source) {
                         this.lastServerFetchFail = 0;
-                        this.setPriceData(this._parseCandleList(candleData), source);
-                        if (candleData15m) {
-                            this.setPriceData15m(this._parseCandleList(candleData15m));
+                        if (source === 'binance') {
+                            this.setPriceData(this._parseBinanceKlines(candleData), source);
+                            if (candleData15m) {
+                                this.setPriceData15m(this._parseBinanceKlines(candleData15m));
+                            }
+                        } else {
+                            this.setPriceData(this._parseCandleList(candleData), source);
+                            if (candleData15m) {
+                                this.setPriceData15m(this._parseCandleList(candleData15m));
+                            }
                         }
                         console.log(`Fetched ${candleData.length} 6H + ${candleData15m ? candleData15m.length : 0} 15m candles from ${source}`);
 
                     } else {
                         this.lastServerFetchFail = Date.now();
                         if (this._first403Logged) {
-                            console.warn('Bybit/OKX blocked — waiting for browser candle relay');
+                            console.warn('All candle sources blocked — waiting for browser candle relay');
                         } else {
                             console.error('Cannot fetch XAU candles from server — browser relay will supply them');
                             this._first403Logged = true;
@@ -301,7 +308,7 @@ class TradingBot {
     }
 
     /**
-     * Run backtest using real-time historical gold data from Bybit
+     * Run backtest using real-time historical gold data
      * @param {number} days - Lookback period
      * @param {string} strategy - Strategy name
      * @param {Array|null} clientCandles - Raw candle arrays from frontend (bypasses server-side fetch)
@@ -318,7 +325,7 @@ class TradingBot {
         
         try {
             let historicalData = null;
-            let dataSource = 'bybit_live';
+            let dataSource = 'binance';
 
             // Anchor end time to start of current UTC day so all runs within
             // the same day fetch the exact same candle window.
@@ -330,8 +337,8 @@ class TradingBot {
             // Priority 1: Use client-provided candles (fetched by user's browser — not IP-blocked)
             if (clientCandles && Array.isArray(clientCandles) && clientCandles.length > 0) {
                 console.log(`Using ${clientCandles.length} candles provided by client browser`);
-                // Client sends raw Bybit format: [[timestamp, open, high, low, close, volume, turnover], ...]
-                // Reverse to chronological (Bybit returns newest-first)
+                // Client sends raw candle format: [[timestamp, open, high, low, close, volume, turnover], ...]
+                // Reverse to chronological
                 const sorted = [...clientCandles].sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
                 historicalData = sorted.map(k => ({
                     timestamp: new Date(parseInt(k[0])),
@@ -380,10 +387,9 @@ class TradingBot {
                 }
             }
 
-            // Priority 3: Fetch from Bybit server-side (works locally, may 403 on Railway)
+            // Priority 3: Fetch from Binance Futures (works from cloud servers)
             if (!historicalData) {
-                console.log('Fetching XAU/USD candles from Bybit API...');
-                const symbol = 'XAUUSDT';
+                console.log('Fetching XAU/USD candles from Binance Futures API...');
                 const totalLimit = requiredCandles;
                 
                 let end = anchoredEnd.getTime();
@@ -392,23 +398,30 @@ class TradingBot {
                 
                 while (remaining > 0) {
                     const chunkLimit = Math.min(remaining, 200);
-                    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${backtestInterval}&limit=${chunkLimit}&end=${end}`;
+                    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval=6h&limit=${chunkLimit}&endTime=${end}`;
                     
-                    const json = await this._fetchBybitData(url);
-                    if (!json || json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) break;
-                    
-                    allCandles = allCandles.concat(json.result.list);
-                    
-                    // Next chunk: go further back in time
-                    const lastTimestamp = parseInt(json.result.list[json.result.list.length - 1][0]);
-                    end = lastTimestamp;
-                    remaining -= chunkLimit;
+                    try {
+                        const response = await fetch(url, {
+                            headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+                            timeout: 15000
+                        });
+                        if (!response.ok) throw new Error(`Binance: ${response.status}`);
+                        const data = await response.json();
+                        if (!Array.isArray(data) || data.length === 0) break;
+                        
+                        allCandles = allCandles.concat(data);
+                        end = parseInt(data[data.length - 1][0]);
+                        remaining -= chunkLimit;
+                    } catch (err) {
+                        console.error('Binance fetch failed:', err.message);
+                        break;
+                    }
                     
                     await new Promise(resolve => setTimeout(resolve, 200));
                 }
 
                 if (allCandles.length === 0) {
-                    throw new Error('Failed to fetch historical data. Bybit may be blocked on this server. Please try again — the browser will fetch the data directly.');
+                    throw new Error('Failed to fetch historical data from Binance.');
                 }
                 
                 historicalData = allCandles.reverse().map(k => ({
@@ -421,7 +434,7 @@ class TradingBot {
                     price: parseFloat(k[4])
                 }));
                 
-                console.log(`✓ Fetched ${historicalData.length} XAU candles from Bybit`);
+                console.log(`✓ Fetched ${historicalData.length} XAU candles from Binance`);
 
                 // Cache to file for reproducibility within the same day
                 try {
@@ -468,7 +481,7 @@ class TradingBot {
                     } catch (e) { console.warn('15m cache read failed:', e.message); }
                 }
 
-                // Fetch 15m from Bybit if not cached
+                // Fetch 15m from Binance if not cached
                 if (!historicalData15m) {
                     console.log('Fetching 15m candles for MTF backtest...');
                     let end = anchoredEnd.getTime();
@@ -476,13 +489,17 @@ class TradingBot {
                     let remaining15 = Math.ceil(requiredCandles * 24); // 24× 15m per 6H
                     while (remaining15 > 0) {
                         const chunk = Math.min(remaining15, 200);
-                        const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=XAUUSDT&interval=${btInterval15}&limit=${chunk}&end=${end}`;
                         try {
-                            const json = await this._fetchBybitData(url);
-                            if (!json || json.retCode !== 0 || !json.result?.list?.length) break;
-                            all15m = all15m.concat(json.result.list);
-                            const lastTs = parseInt(json.result.list[json.result.list.length - 1][0]);
-                            end = lastTs;
+                            const url = `https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval=15m&limit=${chunk}&endTime=${end}`;
+                            const response = await fetch(url, {
+                                headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+                                timeout: 15000
+                            });
+                            if (!response.ok) throw new Error(`Binance 15m: ${response.status}`);
+                            const data = await response.json();
+                            if (!Array.isArray(data) || data.length === 0) break;
+                            all15m = all15m.concat(data);
+                            end = parseInt(data[data.length - 1][0]);
                             remaining15 -= chunk;
                             await new Promise(resolve => setTimeout(resolve, 200));
                         } catch { break; }
@@ -494,7 +511,7 @@ class TradingBot {
                             low: parseFloat(k[3]), close: parseFloat(k[4]),
                             volume: parseFloat(k[5] || 0), price: parseFloat(k[4])
                         }));
-                        console.log(`✓ Fetched ${historicalData15m.length} 15m candles from Bybit`);
+                        console.log(`✓ Fetched ${historicalData15m.length} 15m candles from Binance`);
                         try { fs.writeFileSync(cacheFile15, JSON.stringify(historicalData15m.map(d => ({ ...d, timestamp: d.timestamp.toISOString() })))); } catch (e) {}
                     }
                 }
@@ -740,50 +757,38 @@ class TradingBot {
     }
 
     /**
-     * Helper to fetch data from Bybit, with automatic fallback across
-     * multiple Bybit API mirrors and CORS proxies for blocked cloud IPs (e.g. Railway).
+     * Fetch XAUUSDT klines from Binance Futures API.
+     * Binance does not block cloud server IPs like Bybit does.
      */
-    async _fetchBybitData(url) {
-        const bybitDomains = [
-            'api.bybit.com',
-            'api.bytick.com',
-            'api.bybit.nl'
-        ];
+    async _fetchBinanceKlines(interval, limit) {
+        const url = `https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval=${interval}&limit=${limit}`;
+        const response = await fetch(url, {
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            timeout: 15000
+        });
+        if (!response.ok) throw new Error(`Binance: status ${response.status}`);
+        const json = await response.json();
+        if (!Array.isArray(json) || json.length === 0) throw new Error('Binance: empty response');
+        return json;
+    }
 
-        const originalDomain = new URL(url).hostname;
-        const errors = [];
-
-        for (const domain of bybitDomains) {
-            try {
-                const domainUrl = url.replace(originalDomain, domain);
-                const response = await fetch(domainUrl, {
-                    headers: {
-                        'Accept': 'application/json, text/plain, */*',
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Accept-Encoding': 'gzip, deflate, br',
-                        'Connection': 'keep-alive',
-                        'Sec-Fetch-Dest': 'empty',
-                        'Sec-Fetch-Mode': 'cors',
-                        'Sec-Fetch-Site': 'same-site',
-                        'Origin': 'https://www.bybit.com',
-                        'Referer': 'https://www.bybit.com/'
-                    },
-                    timeout: 10000
-                });
-                if (response.ok) {
-                    const json = await response.json();
-                    if (json && json.retCode === 0) {
-                        return json;
-                    }
-                }
-                errors.push(`${domain}: status ${response.status}`);
-            } catch (err) {
-                errors.push(`${domain}: ${err.message}`);
-            }
-        }
-
-        throw new Error(errors.join(' | '));
+    /**
+     * Parse Binance Futures kline format into our standard candle format.
+     * Binance format: [openTime, open, high, low, close, volume, closeTime, ...]
+     */
+    _parseBinanceKlines(klines) {
+        return klines.map(k => ({
+            timestamp: new Date(parseInt(k[0])),
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+            volume: parseFloat(k[5] || 0),
+            price: parseFloat(k[4])
+        }));
     }
 
     async _fetchOKXData() {
