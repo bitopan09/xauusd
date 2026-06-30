@@ -52,11 +52,20 @@ class TradeEngine {
         ];
 
         // ── Dynamic risk % (equity-based tiers) ────────────────────
+        // Scales risk *down* as equity grows to prevent over-leverage:
+        //   $0-30:   3%  (conservative recovery)
+        //   $30-45:  5%
+        //   $45-60:  7.5%
+        //   $60-200: 10% (sweet spot for compounding)
+        //   $200-400:7.5% (de-risk as equity grows)
+        //   $400+:   5%  (preserve capital, steady compounding)
         this.EQUITY_RISK_PCT = config.equityRiskPct ?? [
-            { minEquity: 60, riskPct: 10 },
-            { minEquity: 45, riskPct: 7.5 },
-            { minEquity: 30, riskPct: 5 },
-            { minEquity: 0,  riskPct: 3 },
+            { minEquity: 400, riskPct: 5 },
+            { minEquity: 200, riskPct: 7.5 },
+            { minEquity: 60,  riskPct: 10 },
+            { minEquity: 45,  riskPct: 7.5 },
+            { minEquity: 30,  riskPct: 5 },
+            { minEquity: 0,   riskPct: 3 },
         ];
 
         // ── Risk management ────────────────────────────────────────

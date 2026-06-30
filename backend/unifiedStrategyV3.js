@@ -307,14 +307,16 @@ class UnifiedStrategy {
         // Classification using ADX + ATR (calibrated for XAUUSD 6H)
         // Scale thresholds for shorter intervals: ATR scales with sqrt(time)
         // base atrPct threshold = 0.50 (for 6H=360m), base bbWidth threshold = 3.0
+        // ADX threshold also scales down for shorter TFs (ADX is naturally lower with noise)
         const timeScale = Math.sqrt(this.interval / 360);
         const atrPctThreshold = 0.50 * timeScale;
         const bbWidthThreshold = 3.0 * timeScale;
+        const adxThreshold = Math.max(20, Math.round(25 * Math.min(1, timeScale * 1.5)));
 
         let regime;
-        if (adx > 25 && atrPct > atrPctThreshold) {
+        if (adx > adxThreshold && atrPct > atrPctThreshold) {
             regime = 'volatile';
-        } else if (adx > 25) {
+        } else if (adx > adxThreshold) {
             regime = 'trending';
         } else if (bbWidth > bbWidthThreshold) {
             regime = 'volatile';
@@ -479,9 +481,9 @@ class UnifiedStrategy {
         const fib618 = high - range * 0.618;
         const fib50 = high - range * 0.5;
 
-        // Premium zone (above 0.5) — avoid buying
+        // Premium zone (above 0.5) — ideal for bearish entries / sell-side pullback
         if (price > fib50 + range * 0.02) {
-            return { inZone: false, zone: 'premium', fibLevel: null };
+            return { inZone: true, zone: 'premium', fibLevel: 0.5 };
         }
 
         // Discount zone (0.382 - 0.618) — ideal for buys
@@ -796,13 +798,14 @@ class UnifiedStrategy {
         if (supertrend.direction === 'BEARISH') { bearScore += 1; details.push('Supertrend bear'); }
 
         // ── Factor 2: PULLBACK QUALITY (weight 0.30) ──────────────
-        // V3: Prefer entries at discount Fib levels for trend trades
+        // V3: Prefer entries at Fib levels aligned with trend
         if (pullback.inZone && pullback.zone === 'discount') {
             // Bull pullback: price in discount zone + bullish trend context
             if (ema921bull || priceAbove50) {
                 bullScore += 3;
                 details.push(`Fib pullback in discount zone (${pullback.fibLevel})`);
             }
+        } else if (pullback.inZone && pullback.zone === 'premium') {
             // Bear pullback: price in premium zone + bearish trend context
             if (ema921bear || priceBelow50) {
                 bearScore += 3;
@@ -1028,32 +1031,47 @@ class UnifiedStrategy {
                 }
             }
 
-            // Change 1: Trend direction gate — block counter-trend trades
-            // In bearish trend (EMA50 < EMA200): only allow SELL
-            // In bullish trend (EMA50 > EMA200): only allow BUY
-            // In ranging: allow both (no trend gate)
+            // Change 1: Trend direction gate — require higher confidence for counter-trend trades
+            // Counter-trend trades need stronger confluence to pass
             if (signal !== 'NEUTRAL') {
                 if (trendBearish && signal === 'BUY') {
-                    signal = 'NEUTRAL';
-                    filterBreakdown.rejectedReason = 'Counter-trend BUY blocked (bearish trend: EMA50 < EMA200)';
+                    if (confluence.scoreMargin < 2.0) {
+                        signal = 'NEUTRAL';
+                        filterBreakdown.rejectedReason = `Counter-trend BUY blocked (margin: ${confluence.scoreMargin.toFixed(1)}, need >= 2.0)`;
+                    } else {
+                        filterBreakdown.rejectedReason = 'Counter-trend BUY passed (strong confluence)';
+                    }
                 }
                 if (trendBullish && signal === 'SELL') {
-                    signal = 'NEUTRAL';
-                    filterBreakdown.rejectedReason = 'Counter-trend SELL blocked (bullish trend: EMA50 > EMA200)';
+                    if (confluence.scoreMargin < 2.0) {
+                        signal = 'NEUTRAL';
+                        filterBreakdown.rejectedReason = `Counter-trend SELL blocked (margin: ${confluence.scoreMargin.toFixed(1)}, need >= 2.0)`;
+                    } else {
+                        filterBreakdown.rejectedReason = 'Counter-trend SELL passed (strong confluence)';
+                    }
                 }
             }
 
-            // Change 7: Regime-based BUY filter — volatile kills BUYs (25% WR historically)
-            // Block BUYs in volatile regime; allow SELLs everywhere
-            if (signal === 'BUY' && regime?.regime === 'volatile') {
+            // Change 7: Volatile regime filter — BUY in volatile has poor WR (33%)
+            // SELL in volatile is profitable (68% WR). Keep the BUY block.
+            if (regime?.regime === 'volatile' && signal === 'BUY') {
                 signal = 'NEUTRAL';
-                filterBreakdown.rejectedReason = 'BUY blocked in volatile regime (historically 25% WR)';
+                filterBreakdown.rejectedReason = 'BUY blocked in volatile regime (33% WR historically)';
+            }
+
+            // Change 8: RSI quality filter — BUY needs RSI > 55 ("bull" not "weak bull")
+            // Weak RSI buys in bearish market have 22% WR (vs 50% for RSI > 55)
+            if (signal === 'BUY' && confluence.indicators && confluence.indicators.rsi <= 55) {
+                signal = 'NEUTRAL';
+                filterBreakdown.rejectedReason = `BUY blocked — RSI weak (${confluence.indicators.rsi.toFixed(1)}, need > 55)`;
             }
 
             // Change 4: Score margin quality gate — require directional confidence
-            if (signal !== 'NEUTRAL' && confluence.scoreMargin < 1.0) {
+            let minMargin = 1.0;
+            if (signal === 'BUY') minMargin = 2.0;
+            if (signal !== 'NEUTRAL' && confluence.scoreMargin < minMargin) {
                 signal = 'NEUTRAL';
-                filterBreakdown.rejectedReason = `Insufficient directional confidence (margin: ${confluence.scoreMargin.toFixed(1)}, need >= 1.0)`;
+                filterBreakdown.rejectedReason = `Insufficient directional confidence (margin: ${confluence.scoreMargin.toFixed(1)}, need >= ${minMargin.toFixed(1)})`;
             }
         }
 
@@ -1155,7 +1173,7 @@ class UnifiedStrategy {
             const adj = goldMeta.volAdj.slAdjustment ?? 1;
             slDistance *= adj;
             slDistance = Math.min(slDistance, this.MAX_SL_DISTANCE);
-            console.log(`[DEBUG calcRP] volAdj trigged! orig=${origSl.toFixed(2)} adj=${adj.toFixed(2)} → ${slDistance.toFixed(2)} | MAX_SL=${this.MAX_SL_DISTANCE}`);
+            console.log(`[DEBUG calcRP] volAdj trigged! orig=${origSl.toFixed(2)} adj=${adj.toFixed(2)} → ${slDistance.toFixed(2)} | cap=${this.MAX_SL_DISTANCE}`);
         }
 
         const tp1Distance = slDistance * tp1RR;

@@ -27,6 +27,17 @@ class TradingBot {
         this.executionEngine.onTradeClosed = (trade) => {
             if (trade.userId === 'default') {
                 this.decisionEngine.recordTradeOutcome(trade);
+                // Track volatile trade performance for adaptive cool-off (live path)
+                if (trade.regime === 'volatile') {
+                    if (trade.netPnl < 0) {
+                        this.volatileLossStreak++;
+                        if (this.volatileLossStreak >= 2) {
+                            this.volatileCooloff = Math.min(this.volatileLossStreak * 2, 5);
+                        }
+                    } else {
+                        this.volatileLossStreak = 0;
+                    }
+                }
             }
         };
 
@@ -43,6 +54,8 @@ class TradingBot {
         this.FIXED_QUANTITY = Number(process.env.XAU_QUANTITY) || 0.01; // Configurable via env
         this.MAX_LOSS_PERCENT = Number(process.env.MAX_LOSS_PERCENT) || 10;
         this.MAX_POSITION_LOTS = Number(process.env.MAX_POSITION_LOTS) || 0.1;
+        this.volatileLossStreak = 0;
+        this.volatileCooloff = 0;
 
         this._initializePriceData();
     }
@@ -131,9 +144,11 @@ class TradingBot {
 
             if (!hasFreshCandles) {
                 this.lastServerFetchFail = this.lastServerFetchFail || 0;
-                const hoursSinceLastFail = (Date.now() - this.lastServerFetchFail) / 3600000;
+                this.candleConsecutiveFails = this.candleConsecutiveFails || 0;
+                const minsSinceLastFail = (Date.now() - this.lastServerFetchFail) / 60000;
+                const backoffMins = Math.min(30, 1 * Math.pow(2, this.candleConsecutiveFails));
 
-                if (hoursSinceLastFail > 6) {
+                if (minsSinceLastFail >= backoffMins) {
                     let candleData = null;
                     let candleData15m = null;
                     let source = null;
@@ -166,6 +181,7 @@ class TradingBot {
 
                     if (candleData && source) {
                         this.lastServerFetchFail = 0;
+                        this.candleConsecutiveFails = 0;
                         if (source === 'binance') {
                             this.setPriceData(this._parseBinanceKlines(candleData), source);
                             if (candleData15m) {
@@ -181,6 +197,7 @@ class TradingBot {
 
                     } else {
                         this.lastServerFetchFail = Date.now();
+                        this.candleConsecutiveFails = (this.candleConsecutiveFails || 0) + 1;
                         if (this._first403Logged) {
                             console.warn('All candle sources blocked — waiting for browser candle relay');
                         } else {
@@ -241,6 +258,22 @@ class TradingBot {
                     this.db.get("SELECT usd_balance FROM balance WHERE userId = 'default' ORDER BY timestamp DESC LIMIT 1", (err, row) => res(row));
                 });
                 const currentEquity = balanceRow && balanceRow.usd_balance ? balanceRow.usd_balance : 50;
+                const regimeName = riskParams?.regime || 'ranging';
+
+                // Pre-trade equity safety: skip volatile trades when equity is too low
+                // to survive the per-trade loss at 0.01 minimum lots.
+                const minLotRisk = 0.01 * slDistance * 100;
+                const riskEqRatio = minLotRisk / currentEquity;
+                if (riskEqRatio > 0.35) {
+                    console.log(`[SAFETY SKIP] minLot risk $${minLotRisk.toFixed(2)}=${(riskEqRatio*100).toFixed(0)}% equity (cap 35%) | eq=$${currentEquity} regime=${regimeName} slDist=${slDistance}`);
+                    return;
+                }
+                // Block volatile regime trades when cool-off is active (consecutive volatile losses)
+                if (regimeName === 'volatile' && this.volatileCooloff > 0) {
+                    console.log(`[SAFETY SKIP] volatile cool-off (${this.volatileCooloff} bars) — volatility=${this.volatileLossStreak} consecutive losses`);
+                    return;
+                }
+
                 const riskAmount = Math.max(1, currentEquity * (this.MAX_LOSS_PERCENT / 100));
                 const CONTRACT_SIZE = 100;
                 const quantity = slDistance > 0
@@ -257,6 +290,7 @@ class TradingBot {
                     tp2: tp2,
                     atr: riskParams.atr, // Pass ATR so ExecutionEngine uses correct trailing stop thresholds
                     score: decision.details.score,
+                    regime: regimeName,
                     notes: decision.details.analysis.confluenceScorer?.details || ''
                 };
 
@@ -563,6 +597,9 @@ class TradingBot {
             let lastTradeDate = null;
             let consecutiveLosses = 0;
             let consecutiveLossCooloff = 0;
+            let volatileLossStreak = 0;
+            let volatileCooloff = 0;
+            let dailyTradeCount = 0;
 
             // Track regime distribution
             const regimeCounts = { trending: 0, volatile: 0, ranging: 0, unknown: 0 };
@@ -582,11 +619,13 @@ class TradingBot {
                 if (currentTradeDate !== candleDate) {
                     currentTradeDate = candleDate;
                     dailyLossCount = 0;
+                    dailyTradeCount = 0;
                     dailyStartEquity = equity;
                 }
 
                 // Decrement consecutive loss cool-off each candle
                 if (consecutiveLossCooloff > 0) consecutiveLossCooloff--;
+                if (volatileCooloff > 0) volatileCooloff--;
 
                 // ── EXIT: Check active trade (shared trailing stop) ──
                 if (activeTrade) {
@@ -601,6 +640,15 @@ class TradingBot {
                             }
                         } else {
                             consecutiveLosses = 0;
+                        }
+                        // Track volatile trade performance for adaptive cool-off
+                        if (activeTrade?.regime === 'volatile' && exitResult.pnl < 0) {
+                            volatileLossStreak++;
+                            if (volatileLossStreak >= 2) {
+                                volatileCooloff = Math.min(volatileLossStreak * 2, 5);
+                            }
+                        } else if (activeTrade?.regime === 'volatile' && exitResult.pnl > 0) {
+                            volatileLossStreak = 0;
                         }
                         // Track exit costs (slippage baked into exitResult by checkTradeExit)
                         const exitSlippage = broker.calculateSlippage({
@@ -642,6 +690,17 @@ class TradingBot {
                     const regimeName = entryResult.analysis?.details?.regime?.regime || 'unknown';
                     regimeCounts[regimeName] = (regimeCounts[regimeName] || 0) + 1;
 
+                    // Guard: volatile cool-off after consecutive volatile losses
+                    if (entryResult.open && regimeName === 'volatile' && volatileCooloff > 0) {
+                        entryResult.open = false;
+                        console.log(`  ⏳ [candle ${i}] VOLATILE COOLOFF (${volatileCooloff} bars) — blocking`);
+                    }
+                    // Guard: max 3 trades per day
+                    if (entryResult.open && dailyTradeCount >= 3) {
+                        entryResult.open = false;
+                        console.log(`  ⏳ [candle ${i}] DAILY CAP (${dailyTradeCount}/3) — blocking`);
+                    }
+
                     if (entryResult.open) {
                         // Track entry costs
                         totalSpreadCost += entryResult.costs.spread / 2 * 0.01;
@@ -651,6 +710,7 @@ class TradingBot {
                         // Assign trade ID and create active trade
                         activeTrade = { ...entryResult.trade, id: trades.length + 1 };
                         lastTradeDate = candleDate;
+                        dailyTradeCount++;
                     }
                 }
 

@@ -1,0 +1,83 @@
+; XAUUSD V4-Plus EA Settings for OctaFX
+; Pre-configured for $50 demo account
+; Date: 2025-06-27
+
+[General]
+InpEAName=V4Plus
+InpConfluenceThreshold=6.5
+InpMinLots=0.01
+InpMaxLots=0.10
+InpMagicNumber=20250627
+
+[Risk Management]
+InpBaseRiskPct=10.0
+InpMidRiskPct=7.5
+InpLowRiskPct=5.0
+InpMicroRiskPct=3.0
+InpMaxDailyLossPct=30.0
+InpMaxDailyLossCount=2
+InpMaxConsecLosses=3
+InpCooldownBars=5
+
+[Trailing Stop]
+InpTrailTriggerR=0.5
+InpTrailTriggerR2=1.5
+InpTrailTriggerR3=3.0
+InpTrailStopR1=0.25
+InpTrailStopR2=0.75
+InpTrailStopR3=1.5
+InpTrailStopR4=2.5
+
+[Partial Close]
+InpPartialClosePct=70.0
+InpTP1RR=1.0
+InpTP2RR=2.0
+
+[Sessions]
+InpLondonOpen=7
+InpLondonClose=16
+InpNewYorkOpen=12
+InpNewYorkClose=21
+InpAsianOpen=23
+InpAsianClose=6
+
+[Confluence Weights]
+InpWeightTrend=0.35
+InpWeightPullback=0.30
+InpWeightMomentum=0.25
+InpWeightStructure=0.10
+
+[Indicators]
+InpRSIPeriod=14
+InpMACDFast=12
+InpMACDSlow=26
+InpMACDSignal=9
+InpEMAFast=9
+InpEMAMedium=21
+InpEMALong=50
+InpEMATrend=200
+InpATRPeriod=14
+InpBBPeriod=20
+InpBBDeviation=2.0
+InpStochK=14
+InpStochD=3
+InpStochSlowing=3
+InpADXPeriod=14
+InpSupertrendPeriod=10
+InpSupertrendFactor=3.0
+InpRegimeLookback=150
+InpVolatileATR=1.35
+InpTrendingADX=25.0
+
+[Multi-Timeframe]
+InpPrimaryTF=H1
+InpConfirmTF=M15
+InpUseMTF=true
+
+[News Filter]
+InpUseNewsFilter=true
+InpNFPDaysBefore=1
+InpNFPDaysAfter=1
+
+[Symbol]
+InpSymbol=XAUUSD
