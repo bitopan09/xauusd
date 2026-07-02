@@ -1017,19 +1017,18 @@ app.post('/api/trades/:id/close', async (req, res) => {
             return res.status(400).json({ error: 'Invalid trade ID' });
         }
         
-        db.get('SELECT price FROM prices ORDER BY timestamp DESC LIMIT 1', async (err, row) => {
-            if (err || !row) {
-                return res.status(500).json({ error: 'Could not get current gold price' });
-            }
-            
-            const result = await tradingBot.executionEngine.manualExitTrade(tradeId, row.price);
-            
-            if (result.success) {
-                res.json(result);
-            } else {
-                res.status(400).json(result);
-            }
-        });
+        const live = await fetchLivePrice();
+        if (!live || !live.price) {
+            return res.status(500).json({ error: 'Could not get current gold price' });
+        }
+        
+        const result = await tradingBot.executionEngine.manualExitTrade(tradeId, live.price);
+        
+        if (result.success) {
+            res.json(result);
+        } else {
+            res.status(400).json(result);
+        }
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -1048,19 +1047,18 @@ app.post('/api/trades/:id/partial-close', async (req, res) => {
             return res.status(400).json({ error: 'closePercent must be between 1 and 100' });
         }
 
-        db.get('SELECT price FROM prices ORDER BY timestamp DESC LIMIT 1', async (err, row) => {
-            if (err || !row) {
-                return res.status(500).json({ error: 'Could not get current gold price' });
-            }
+        const live = await fetchLivePrice();
+        if (!live || !live.price) {
+            return res.status(500).json({ error: 'Could not get current gold price' });
+        }
 
-            const result = await tradingBot.executionEngine.manualPartialClose(tradeId, row.price, closePercent);
+        const result = await tradingBot.executionEngine.manualPartialClose(tradeId, live.price, closePercent);
 
-            if (result.success) {
-                res.json(result);
-            } else {
-                res.status(400).json(result);
-            }
-        });
+        if (result.success) {
+            res.json(result);
+        } else {
+            res.status(400).json(result);
+        }
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
