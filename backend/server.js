@@ -358,61 +358,77 @@ binanceKlineWs6h = connectKlineStream('6h', '6H');
 binanceKlineWs1m = connectKlineStream('1m', '1m');
 binanceKlineWs5m = connectKlineStream('5m', '5m');
 
+// ══════════════════════════════════════════════════════════════════
+// SHARED FETCH HELPERS — Binance primary, OKX fallback (Railway blocks Binance IPs)
+// ══════════════════════════════════════════════════════════════════
+const UA = {
+    'Accept': 'application/json, text/plain, */*',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9',
+};
+
+async function fetchPriceWithFallback() {
+    try {
+        const r = await fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=XAUUSDT', { headers: UA, timeout: 8000 });
+        if (r.ok) { const j = await r.json(); const p = parseFloat(j.price); if (isFinite(p)) return p; }
+    } catch {}
+    try {
+        const r = await fetch('https://www.okx.com/api/v5/market/ticker?instId=XAU-USDT-SWAP', { headers: UA, timeout: 8000 });
+        if (r.ok) { const j = await r.json(); if (j.code === '0' && j.data?.[0]) { const p = parseFloat(j.data[0].last); if (isFinite(p)) return p; } }
+    } catch {}
+    return null;
+}
+
+async function fetchCandlesWithFallback(interval, limit) {
+    const binMap = { '6H': '6h', '5min': '5m', '1min': '1m' };
+    const binInt = binMap[interval] || '6h';
+    const okxMap = { '6H': '6H', '5min': '5m', '1min': '1m' };
+    const okxInt = okxMap[interval] || '6H';
+    try {
+        const r = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval=${binInt}&limit=${limit}`, { headers: UA, timeout: 8000 });
+        if (r.ok) { const d = await r.json(); if (Array.isArray(d) && d.length) return d.map(c => ({ time: Math.floor(parseInt(c[0])/1000), open: parseFloat(c[1]), high: parseFloat(c[2]), low: parseFloat(c[3]), close: parseFloat(c[4]), volume: parseFloat(c[5]) })).sort((a,b) => a.time - b.time); }
+    } catch {}
+    try {
+        const r = await fetch(`https://www.okx.com/api/v5/market/candles?instId=XAU-USDT-SWAP&bar=${okxInt}&limit=${limit}`, { headers: UA, timeout: 8000 });
+        if (r.ok) { const d = await r.json(); if (d.code === '0' && d.data?.length) return d.data.reverse().map(c => ({ time: Math.floor(parseInt(c[0])/1000), open: parseFloat(c[1]), high: parseFloat(c[2]), low: parseFloat(c[3]), close: parseFloat(c[4]), volume: parseFloat(c[5]||0) })).sort((a,b) => a.time - b.time); }
+    } catch {}
+    return null;
+}
+
 // REST price poller — broadcasts real-time price to frontend clients every 2s
 setInterval(async () => {
     try {
-        const resp = await fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=XAUUSDT');
-        if (resp.ok) {
-            const json = await resp.json();
-            const price = parseFloat(json.price);
-            if (price && isFinite(price)) {
-                const now = Date.now();
-                const priceData = {
-                    symbol: 'XAUUSD',
-                    price,
-                    volume: 0,
-                    timestamp: new Date().toISOString(),
-                    _ts: now
-                };
-                latestTickerPrice = priceData;
-                // Always broadcast to all connected frontend clients
-                wss.clients.forEach((client) => {
-                    if (client.readyState === WebSocket.OPEN) {
-                        client.send(JSON.stringify({ type: 'price', data: priceData }));
-                    }
-                });
-            }
+        const price = await fetchPriceWithFallback();
+        if (price && isFinite(price)) {
+            const now = Date.now();
+            const priceData = {
+                symbol: 'XAUUSD', price, volume: 0,
+                timestamp: new Date().toISOString(), _ts: now
+            };
+            latestTickerPrice = priceData;
+            wss.clients.forEach((client) => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify({ type: 'price', data: priceData }));
+                }
+            });
         }
     } catch {}
 }, 2000);
 
-// ═══════════════════════════════════════════════════════
-// SHARED PRICE FETCHER — always returns live Binance price
-// Falls back to WebSocket ticker (if fresh < 5s) else REST
-// ═══════════════════════════════════════════════════════
 async function fetchLivePrice() {
-    // Use WS ticker if it updated within last 5 seconds
     if (latestTickerPrice && latestTickerPrice._ts && (Date.now() - latestTickerPrice._ts) < 5000) {
         return latestTickerPrice;
     }
-    try {
-        const resp = await fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=XAUUSDT');
-        if (resp.ok) {
-            const json = await resp.json();
-            const priceData = {
-                symbol: 'XAUUSD',
-                price: parseFloat(json.price),
-                timestamp: new Date().toISOString(),
-                _ts: Date.now(),
-                volume: 0
-            };
-            latestTickerPrice = priceData;
-            // Keep DB fresh (fire-and-forget)
-            db.run('INSERT INTO prices (symbol, price, volume) VALUES (?, ?, ?)',
-                ['XAUUSD', priceData.price, 0]);
-            return priceData;
-        }
-    } catch {}
+    const price = await fetchPriceWithFallback();
+    if (price && isFinite(price)) {
+        const priceData = {
+            symbol: 'XAUUSD', price, volume: 0,
+            timestamp: new Date().toISOString(), _ts: Date.now()
+        };
+        latestTickerPrice = priceData;
+        db.run('INSERT INTO prices (symbol, price, volume) VALUES (?, ?, ?)', ['XAUUSD', priceData.price, 0]);
+        return priceData;
+    }
     return latestTickerPrice || { price: null };
 }
 
@@ -421,53 +437,33 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
 });
 
-// Candle API — fetch candles from Binance REST (same source as trading bot)
+// Candle API — fetch candles from Binance/OKX with fallback
 app.get('/api/candles', async (req, res) => {
     try {
         const interval = req.query.interval || '6H';
         const limit = Math.min(Math.max(parseInt(req.query.limit) || 200, 1), 500);
 
-        // Map chart intervals to Binance kline intervals
-        const binanceMap = { '6H': '6h', '5min': '5m', '1min': '1m' };
-        const binInterval = binanceMap[interval] || '6h';
+        let candles = await fetchCandlesWithFallback(interval, limit);
+        if (!candles || candles.length === 0) {
+            return res.json([]);
+        }
 
-        const url = `https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval=${binInterval}&limit=${limit}`;
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`Binance ${response.status}`);
-        const data = await response.json();
-        if (!data || !data.length) return res.json([]);
-
-        const candles = data
-            .map(c => ({
-                time: Math.floor(parseInt(c[0]) / 1000),
-                open: parseFloat(c[1]),
-                high: parseFloat(c[2]),
-                low: parseFloat(c[3]),
-                close: parseFloat(c[4]),
-                volume: parseFloat(c[5]),
-            }))
-            .sort((a, b) => a.time - b.time);
-
-        // Append live forming candle price if last candle is stale (>2min old for 1m, >30min for 6H)
+        // Add forming candle for real-time feel
         const now = Date.now() / 1000;
         const maxAge = interval === '1min' ? 120 : interval === '5min' ? 600 : 1800;
-        if (candles.length > 0) {
-            const last = candles[candles.length - 1];
-            const lastAge = now - last.time;
-            // Add a "current price" marker as the forming candle
-            const live = await fetchLivePrice().catch(() => null);
-            if (live && live.price && lastAge > maxAge) {
-                const binIntervalSec = { '6h': 21600, '5m': 300, '1m': 60 };
-                const intervalSec = binIntervalSec[binInterval] || 21600;
-                const currentCandleTime = Math.floor(now / intervalSec) * intervalSec;
-                if (currentCandleTime > last.time) {
+        const last = candles[candles.length - 1];
+        const lastAge = now - last.time;
+        if (lastAge > maxAge) {
+            const binIntervalSec = { '6h': 21600, '5m': 300, '1m': 60 };
+            const binMap = { '6H': '6h', '5min': '5m', '1min': '1m' };
+            const intervalSec = binIntervalSec[binMap[interval]] || 21600;
+            const currentCandleTime = Math.floor(now / intervalSec) * intervalSec;
+            if (currentCandleTime > last.time) {
+                const live = await fetchLivePrice().catch(() => null);
+                if (live && live.price) {
                     candles.push({
-                        time: currentCandleTime,
-                        open: last.close,
-                        high: live.price,
-                        low: live.price,
-                        close: live.price,
-                        volume: 0
+                        time: currentCandleTime, open: last.close,
+                        high: live.price, low: live.price, close: live.price, volume: 0
                     });
                 }
             }

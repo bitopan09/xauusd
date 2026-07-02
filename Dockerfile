@@ -14,8 +14,13 @@ COPY . .
 RUN cd frontend && npm run build
 
 ENV NODE_ENV=production
+ENV CONFLUENCE_THRESHOLD=6.5
+ENV TP1_CLOSE_PERCENT=60
+ENV MAX_SL_DISTANCE=10
+ENV SCORE_MARGIN_MIN=1
+ENV BUY_SCORE_MARGIN=2
+ENV EMA_ALIGNMENT_REQUIRED=false
 
-# Railway dynamically injects PORT — EXPOSE is informational only
 EXPOSE ${PORT:-5002}
 
 CMD ["node", "backend/server.js"]
