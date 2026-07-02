@@ -1,5 +1,6 @@
 const DecisionEngine = require('./decisionEngine');
 const ExecutionEngine = require('./executionEngine');
+const DataManager = require('./dataManager');
 const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
@@ -8,6 +9,7 @@ const { isUsdNewsBlocked } = require('./newsFilter');
 class TradingBot {
     constructor(db) {
         this.db = db;
+        this.dataManager = new DataManager(db);
         this.decisionEngine = new DecisionEngine(this.db, {
             lossesPerSession: Number(process.env.LOSSES_PER_SESSION) || 1,
             maxDailyLosses: Number(process.env.MAX_DAILY_LOSSES) || 2,
@@ -56,8 +58,10 @@ class TradingBot {
         this.MAX_POSITION_LOTS = Number(process.env.MAX_POSITION_LOTS) || 0.1;
         this.volatileLossStreak = 0;
         this.volatileCooloff = 0;
+        this.optimizerParams = null; // Loaded from DB on startup
 
         this._initializePriceData();
+        this._loadOptimizerConfig();
     }
 
     /**
@@ -65,6 +69,32 @@ class TradingBot {
      */
     _initializePriceData() {
         // No seed data — priceData is populated by _analyzeAndTrade() with real candles
+    }
+
+    /**
+     * Load optimized parameters from DB if available.
+     * Overrides env var defaults when an optimizer run has been deployed.
+     */
+    _loadOptimizerConfig() {
+        this.db.get(
+            `SELECT value, score, profit_factor, max_dd_pct, win_rate, trades 
+             FROM optimizer_config WHERE is_active = 1 
+             ORDER BY deployed_at DESC LIMIT 1`,
+            (err, row) => {
+                if (err || !row) {
+                    console.log('[Bot] No optimizer config found — using env var defaults');
+                    return;
+                }
+                try {
+                    const config = JSON.parse(row.value);
+                    this.optimizerParams = config;
+                    console.log(`[Bot] Loaded optimizer config: PF=${row.profit_factor?.toFixed(2)} WR=${(row.win_rate*100)?.toFixed(1)}% Score=${row.score?.toFixed(2)}`);
+                    console.log(`[Bot] Optimized params:`, config);
+                } catch (e) {
+                    console.warn('[Bot] Failed to parse optimizer config:', e.message);
+                }
+            }
+        );
     }
 
     setPriceData(priceData, source = 'unknown') {
@@ -221,6 +251,19 @@ class TradingBot {
                     console.warn('No fresh candle data available — waiting for browser relay');
                 }
                 return;
+            }
+
+            // Apply optimizer config if available (overrides env defaults)
+            if (this.optimizerParams) {
+                if (this.optimizerParams.confluenceThreshold) {
+                    process.env.CONFLUENCE_THRESHOLD = String(this.optimizerParams.confluenceThreshold);
+                }
+                if (this.optimizerParams.tp1ClosePercent) {
+                    process.env.TP1_CLOSE_PERCENT = String(this.optimizerParams.tp1ClosePercent);
+                }
+                if (this.optimizerParams.maxSlDistance) {
+                    process.env.MAX_SL_DISTANCE = String(this.optimizerParams.maxSlDistance);
+                }
             }
 
             // Perform analysis and make decision (MTF if 15m data available)
@@ -421,71 +464,29 @@ class TradingBot {
                 }
             }
 
-            // Priority 3: Fetch from Binance Futures (works from cloud servers)
+            // Use DataManager for multi-source fetching (Binance → OKX → cache)
             if (!historicalData) {
-                console.log('Fetching XAU/USD candles from Binance Futures API...');
-                const totalLimit = requiredCandles;
-                
-                let end = anchoredEnd.getTime();
-                let allCandles = [];
-                let remaining = totalLimit;
-                
-                while (remaining > 0) {
-                    const chunkLimit = Math.min(remaining, 200);
-                    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval=6h&limit=${chunkLimit}&endTime=${end}`;
-                    
-                    try {
-                        const response = await fetch(url, {
-                            headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
-                            timeout: 15000
-                        });
-                        if (!response.ok) throw new Error(`Binance: ${response.status}`);
-                        const data = await response.json();
-                        if (!Array.isArray(data) || data.length === 0) break;
-                        
-                        allCandles = allCandles.concat(data);
-                        end = parseInt(data[data.length - 1][0]);
-                        remaining -= chunkLimit;
-                    } catch (err) {
-                        console.error('Binance fetch failed:', err.message);
-                        break;
+                console.log('Fetching XAU/USD candles via DataManager (Binance → OKX → cache)...');
+                historicalData = await this.dataManager.getHistoricalData(requiredCandles, backtestInterval, anchoredEnd.getTime(), clientCandles);
+
+                if (historicalData && historicalData.length > 0) {
+                    dataSource = historicalData[0]?.source || 'datamanager';
+                    console.log(`✓ DataManager returned ${historicalData.length} candles (source: ${dataSource})`);
+
+                    // Validate data quality
+                    const validation = this.dataManager.validateData(historicalData);
+                    if (!validation.valid) {
+                        console.warn(`[DataManager] Quality issues detected: ${validation.issues.join('; ')}`);
+                    } else {
+                        console.log(`[DataManager] Data quality OK: ${validation.count} candles, ${validation.firstDate} → ${validation.lastDate}`);
                     }
-                    
-                    await new Promise(resolve => setTimeout(resolve, 200));
+                } else {
+                    console.error('DataManager returned no data — all sources failed');
                 }
+            }
 
-                if (allCandles.length === 0) {
-                    throw new Error('Failed to fetch historical data from Binance.');
-                }
-                
-                historicalData = allCandles.reverse().map(k => ({
-                    timestamp: new Date(parseInt(k[0])),
-                    open: parseFloat(k[1]),
-                    high: parseFloat(k[2]),
-                    low: parseFloat(k[3]),
-                    close: parseFloat(k[4]),
-                    volume: parseFloat(k[5]),
-                    price: parseFloat(k[4])
-                }));
-                
-                console.log(`✓ Fetched ${historicalData.length} XAU candles from Binance`);
-
-                // Cache to file for reproducibility within the same day
-                try {
-                    const files = fs.readdirSync(__dirname).filter(f => f.startsWith('xau_backtest_cache_') && f.endsWith('.json'));
-                    files.forEach(f => {
-                        if (!f.includes(dateKey) || !f.includes(backtestInterval)) {
-                            try { fs.unlinkSync(path.join(__dirname, f)); } catch (e) {}
-                        }
-                    });
-                    fs.writeFileSync(cacheFile, JSON.stringify(historicalData.map(d => ({
-                        ...d,
-                        timestamp: d.timestamp.toISOString()
-                    }))));
-                    console.log(`✓ Cached data to ${cacheFile}`);
-                } catch (writeErr) {
-                    console.warn('Could not write cache file:', writeErr.message);
-                }
+            if (!historicalData || historicalData.length === 0) {
+                throw new Error('Failed to fetch historical data from all sources (Binance, OKX, cache).');
             }
 
             if (historicalData.length > requiredCandles) {
@@ -807,7 +808,9 @@ class TradingBot {
                     tp1: t.tp1, tp2: t.tp2, remainingQuantity: t.remainingQuantity,
                     realizedPnl: t.realizedPnl, tp1Hit: t.tp1Hit, score: t.score, confluence: t.confluence,
                     exitReason: t.exitReason, regime: t.regime
-                }))
+                })),
+                // Raw price data for optimizer reuse
+                rawPriceData: historicalData,
             };
 
         } catch (error) {

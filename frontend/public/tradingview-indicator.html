@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>V4-Plus XAU/USD Indicator — Pine Script</title>
+<style>body{font-family:'Courier New',monospace;background:#1a1a2e;color:#e2e8f0;max-width:800px;margin:auto;padding:20px}pre{background:#16213e;padding:16px;border-radius:8px;overflow-x:auto;font-size:13px;line-height:1.5;border:1px solid #334}code{color:#4ade80}.comment{color:#94a3b8}h2{color:#f0c27f}.note{background:#1e293b;padding:12px;border-radius:6px;margin:12px 0;border-left:3px solid #f0c27f}</style>
+</head>
+<body>
+<h2>V4-Plus XAU/USD Strategy — Pine Script</h2>
+<div class="note">
+<strong>How to use:</strong> Open TradingView → Pine Editor → Paste → Add to XAU/USD chart (6H).<br>
+Shows BUY/SELL arrows when confluence score exceeds threshold 6.5.
+</div>
+<pre><code>//@version=5
+indicator(title="V4-Plus XAU/USD", shorttitle="V4-Plus Gold", overlay=true)
+
+// ── Inputs ──
+confluenceThreshold = input.float(6.5, "Threshold", step=0.5, minval=4, maxval=9)
+showSignals = input.bool(true, "Show Signals")
+showScore = input.bool(true, "Show Score")
+
+// ── 1. DMI ──
+[diPlus, diMinus, adx] = ta.dmi(14, 14)
+dmiBullish = diPlus > diMinus
+dmiScore = dmiBullish ? 1.5 : 0.0
+
+// ── 2. MACD ──
+[macdLine, signalLine, _] = ta.macd(close, 12, 26, 9)
+macdBullish = macdLine > signalLine
+macdScore = macdBullish ? 1.5 : 0.0
+
+// ── 3. EMA Trend ──
+ema9 = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+ema50 = ta.ema(close, 50)
+emaTrendBullish = ema9 > ema21 and close > ema50
+emaTrendScore = emaTrendBullish ? 1.5 : 0.0
+
+// ── 4. RSI ──
+rsi = ta.rsi(close, 14)
+rsiBullish = rsi > 55
+rsiScore = rsiBullish ? 1.0 : 0.0
+
+// ── 5. SMA ──
+smaBullish = ta.sma(close, 20) > ta.sma(close, 50)
+smaScore = smaBullish ? 0.5 : 0.0
+
+// ── 6. PSAR ──
+psar = ta.sar(0.02, 0.02, 0.2)
+psarBullish = close > psar
+psarScore = psarBullish ? 0.5 : 0.0
+
+// ── 7. Stochastic ──
+stochK = ta.stoch(close, high, low, 14)
+stochBullish = stochK > 50
+stochScore = stochBullish ? 0.5 : 0.0
+
+// ── 8. EMA2 Alignment ──
+ema2Bullish = ema9 > ema21 and close > ema9
+ema2Score = ema2Bullish ? 1.0 : 0.0
+
+// ── Weighted Confluence Score ──
+bullScore = dmiScore + macdScore + emaTrendScore + rsiScore + smaScore + psarScore + stochScore + ema2Score
+bearScore = 8.5 + 8.5 - bullScore  // total bear max = 8.5 (weights sum / 2 * 2)
+
+direction = bullScore > bearScore ? "BULLISH" : bearScore > bullScore ? "BEARISH" : "NEUTRAL"
+score = math.max(bullScore, bearScore)
+
+// ── Regime Detection ──
+atr = ta.atr(14)
+atrSma20 = ta.sma(atr, 20)
+isVolatile = atrSma20 > 0 and atr > atrSma20 * 1.3
+
+// ── Session Gate ──
+sessionOpen = hour >= 6 and hour < 20
+
+// ── Signal Logic ──
+regimeBuffer = isVolatile ? math.max(0.5, 0.5 + (adx > 35 ? 0.2 : 0) + (atr / atrSma20 > 1.5 ? 0.3 : 0)) : 0
+effectiveThreshold = confluenceThreshold + regimeBuffer
+
+scoreMargin = math.abs(bullScore - bearScore)
+
+buyRaw = score >= effectiveThreshold and direction == "BULLISH" and scoreMargin >= 2.0 and sessionOpen and rsi > 55
+sellRaw = score >= effectiveThreshold and direction == "BEARISH" and scoreMargin >= 1.0 and sessionOpen
+
+// Volatile BUY block
+if isVolatile and buyRaw
+    buyRaw := false
+
+// EMA penalty for BUY
+if buyRaw and not ema2Bullish and score < effectiveThreshold + 1.0
+    buyRaw := false
+
+// Mutual exclusion
+buySignal = buyRaw and not sellRaw
+sellSignal = sellRaw and not buyRaw
+
+// ── Plotting ──
+plotshape(showSignals and buySignal, style=shape.triangleup, location=location.belowbar, color=#4ade80, size=size.small, text="BUY")
+plotshape(showSignals and sellSignal, style=shape.triangledown, location=location.abovebar, color=#f87171, size=size.small, text="SELL")
+
+// Score line
+hline(confluenceThreshold, "Threshold", color=color.new(#fbbf24, 40), linestyle=hline.style_dashed)
+plot(showScore ? score : na, "Score", color=color.new(#60a5fa, 60), linewidth=2)
+plot(showScore ? effectiveThreshold : na, "Eff. Thresh", color=color.new(#fbbf24, 80), linewidth=1)
+
+// Info label (cleanup each bar)
+var label infoLabel = na
+if barstate.islast
+    label.delete(infoLabel)
+    infoLabel := label.new(bar_index, high + atr * 2,
+         "Score: " + str.tostring(score, "#.#") + "/" + str.tostring(effectiveThreshold, "#.#") +
+         " " + direction +
+         " ADX:" + str.tostring(adx, "#.#"),
+         style=label.style_label_center, textcolor=color.white, size=size.small)
+
+// ── Alerts ──
+alertcondition(buySignal, "BUY", "V4-Plus BUY on XAU/USD")
+alertcondition(sellSignal, "SELL", "V4-Plus SELL on XAU/USD")
+alert("BUY Score: " + str.tostring(score, "#.#"), alert.freq_once_per_bar_close)
+alert("SELL Score: " + str.tostring(score, "#.#"), alert.freq_once_per_bar_close)
+</code></pre>
+</body>
+</html>

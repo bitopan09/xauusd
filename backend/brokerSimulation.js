@@ -31,8 +31,8 @@ class BrokerSimulation {
             news: 3.0,         // Spike during news
         };
 
-        // Slippage in points — OctaFX: 4.1 pips × 10 = 41 points
-        this.baseSlippage = config.baseSlippage || 41; // User-reported OctaFX slippage
+        // Slippage in points — OctaFX: 4.2 pips × 10 = 42 points
+        this.baseSlippage = config.baseSlippage || 42; // User-reported OctaFX slippage (4.2 pips)
         this.maxSlippage = config.maxSlippage || 60;
 
         // Commission in USD per lot round-turn — OctaFX standard account has NO commission

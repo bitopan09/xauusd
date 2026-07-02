@@ -52,8 +52,13 @@ class UnifiedStrategy {
             ranging:   1.5,
             volatile:  3.0,
         };
-        this.TP1_CLOSE_PERCENT = config.tp1ClosePercent ?? 100;
+        this.TP1_CLOSE_PERCENT = config.tp1ClosePercent ?? 50; // Default 50% at TP1
         this.MAX_SL_DISTANCE = config.maxSlDistance ?? Infinity;
+
+        // Optimizer-tunable params (via env vars or config object)
+        this.SCORE_MARGIN_MIN = config.scoreMarginMin ?? (Number(process.env.SCORE_MARGIN_MIN) || 1.0);
+        this.BUY_SCORE_MARGIN = config.buyScoreMargin ?? (Number(process.env.BUY_SCORE_MARGIN) || 2.0);
+        this.EMA_ALIGNMENT_REQUIRED = config.emaAlignmentRequired ?? (process.env.EMA_ALIGNMENT_REQUIRED === 'true' || false);
 
         // Convenience aliases for external consumers (tradingBot backtest, etc.)
         this.TP1_RR = config.tp1RR ?? null;
@@ -999,10 +1004,16 @@ class UnifiedStrategy {
         //   5. Session is not blocked
         // ═══════════════════════════════════════════════════════════
 
-        // Change 5: Regime-adjusted threshold — volatile regime needs higher bar
-        const effectiveThreshold = regime?.regime === 'volatile'
-            ? this.CONFLUENCE_THRESHOLD + 0.5  // 6.0 for volatile
-            : this.CONFLUENCE_THRESHOLD;       // 5.5 for trending/ranging
+        // Change 5: Adaptive regime-adjusted threshold
+        // Volatile regime: adaptive buffer (min 0.5, max 1.0)
+        // Trending/ranging: base threshold (no change from V4-Plus baseline)
+        const adxVal = confluence.indicators?.adx || 20;
+        const atrRatio = confluence.indicators?.atrRatio || 1.0;
+        let regimeBuffer = 0;
+        if (regime?.regime === 'volatile') {
+            regimeBuffer = Math.max(0.5, 0.5 + (adxVal > 35 ? 0.2 : 0) + (atrRatio > 1.5 ? 0.3 : 0));
+        }
+        const effectiveThreshold = this.CONFLUENCE_THRESHOLD + regimeBuffer;
 
         if (score >= effectiveThreshold) {
             const scoreMargin = confluence.scoreMargin;
@@ -1066,16 +1077,32 @@ class UnifiedStrategy {
                 filterBreakdown.rejectedReason = `BUY blocked — RSI weak (${confluence.indicators.rsi.toFixed(1)}, need > 55)`;
             }
 
-            // Change 4: Score margin quality gate — require directional confidence
-            let minMargin = 1.0;
-            if (signal === 'BUY') minMargin = 2.0;
+            // Change 9: BUY EMA crossover — configurable: optional score penalty or hard block
+            // If EMA 9/21 is not bullish, BUY trades need higher score to compensate
+            if (signal === 'BUY' && !bullishEma) {
+                if (this.EMA_ALIGNMENT_REQUIRED) {
+                    // Hard block: BUY requires EMA alignment
+                    signal = 'NEUTRAL';
+                    filterBreakdown.rejectedReason = `BUY blocked — EMA 9/21 alignment required (EMA9 ${ema9Val > ema21Val ? '>' : '<'} EMA21)`;
+                } else {
+                    // Penalize: require score >= threshold + 1.0 extra if EMA not aligned
+                    if (score < effectiveThreshold + 1.0) {
+                        signal = 'NEUTRAL';
+                        filterBreakdown.rejectedReason = `BUY blocked — EMA 9/21 weak (EMA9 ${ema9Val > ema21Val ? '>' : '<'} EMA21, score ${score.toFixed(1)} < ${(effectiveThreshold + 1.0).toFixed(1)})`;
+                    }
+                }
+            }
+
+            // Change 4: Score margin quality gate — require directional confidence (tunable)
+            let minMargin = this.SCORE_MARGIN_MIN;
+            if (signal === 'BUY') minMargin = this.BUY_SCORE_MARGIN;
             if (signal !== 'NEUTRAL' && confluence.scoreMargin < minMargin) {
                 signal = 'NEUTRAL';
                 filterBreakdown.rejectedReason = `Insufficient directional confidence (margin: ${confluence.scoreMargin.toFixed(1)}, need >= ${minMargin.toFixed(1)})`;
             }
         }
 
-        // ── Session block ──────────────────────────────────────────
+        // ── Session block (binary gate — proven effective) ──────────────────
         const goldMeta = confluence.goldMeta;
         if (signal !== 'NEUTRAL' && goldMeta && goldMeta.session) {
             const sessionMin = goldMeta.session.characteristics?.minScore;
@@ -1173,13 +1200,13 @@ class UnifiedStrategy {
             const adj = goldMeta.volAdj.slAdjustment ?? 1;
             slDistance *= adj;
             slDistance = Math.min(slDistance, this.MAX_SL_DISTANCE);
-            console.log(`[DEBUG calcRP] volAdj trigged! orig=${origSl.toFixed(2)} adj=${adj.toFixed(2)} → ${slDistance.toFixed(2)} | cap=${this.MAX_SL_DISTANCE}`);
+            // volAdj applied (suppressed for performance)
         }
 
         const tp1Distance = slDistance * tp1RR;
         const tp2Distance = slDistance * tp2RR;
 
-        console.log(`[DEBUG calcRP] slDist=${slDistance.toFixed(2)} | MAX_SL=${this.MAX_SL_DISTANCE} | tp1Dist=${tp1Distance.toFixed(2)} tp2Dist=${tp2Distance.toFixed(2)}`);
+        // Risk params computed (suppressed for performance)
 
         return {
             atr,

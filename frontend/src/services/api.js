@@ -23,7 +23,7 @@ const userId = getOrCreateUserId();
 
 const withUserId = (data = {}) => ({ ...data, userId });
 
-export { userId, API_BASE_URL };
+export { userId, API_BASE_URL, KLINE_INTERVAL_SEC };
 
 export const fetchPrice = async () => {
     try {
@@ -117,7 +117,67 @@ export const recordTrade = async (tradeData) => {
     }
 };
 
-// WebSocket service for real-time price updates with reconnection
+export const fetchCandles = async (interval = '6H', limit = 200) => {
+    const url = `${API_BASE_URL}/candles?interval=${interval}&limit=${limit}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Candles API: ${response.status}`);
+    const json = await response.json();
+    if (!json || !json.length) {
+        throw new Error('No candle data from server');
+    }
+    // Server returns Lightweight Charts format already: { time, open, high, low, close }
+    return json.sort((a, b) => a.time - b.time);
+};
+
+
+// Fetch latest ticker price from Bybit REST API
+export const fetchTicker = async () => {
+    const url = 'https://api.bybit.com/v5/market/tickers?category=linear&symbol=XAUUSDT';
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Bybit ticker: ${response.status}`);
+    const json = await response.json();
+    if (json.retCode !== 0 || !json.result?.list?.length) {
+        throw new Error('Bybit ticker returned no data');
+    }
+    const t = json.result.list[0];
+    return {
+        price: parseFloat(t.lastPrice),
+        volume: parseFloat(t.turnover24h || 0),
+        timestamp: Date.now(),
+    };
+};
+
+// Polling-based live price source (Bybit REST fallback — works when WS is dead)
+export const createPricePoller = (onPrice, intervalMs = 3000) => {
+    let timer = null;
+    let stopped = false;
+
+    const poll = async () => {
+        if (stopped) return;
+        try {
+            const data = await fetchTicker();
+            if (!stopped && data.price) {
+                onPrice({ type: 'price', data });
+            }
+        } catch {
+            // silent — will retry next interval
+        }
+        if (!stopped) {
+            timer = setTimeout(poll, intervalMs);
+        }
+    };
+
+    poll();
+
+    return {
+        close: () => {
+            stopped = true;
+            if (timer) clearTimeout(timer);
+        },
+    };
+};
+
+// WebSocket service for real-time price + kline updates with reconnection
 export const createPriceWebSocket = (onMessage) => {
     let wsUrl;
     
@@ -143,6 +203,7 @@ export const createPriceWebSocket = (onMessage) => {
         ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
+                // Forward all message types: 'price', 'kline'
                 onMessage(data);
             } catch (error) {
                 // Ignore parse errors (pong messages, etc.)
@@ -168,4 +229,11 @@ export const createPriceWebSocket = (onMessage) => {
             if (ws) ws.close();
         }
     };
+};
+
+// Kline interval seconds lookup
+const KLINE_INTERVAL_SEC = {
+    '6H': 21600,
+    '5min': 300,
+    '1min': 60,
 };

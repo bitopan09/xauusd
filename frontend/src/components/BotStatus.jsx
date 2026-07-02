@@ -2,8 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { formatTimeIST } from '../utils/timeFormatter';
 import { API_BASE_URL } from '../services/api';
 
-const PUSH_INTERVAL = 30000;
-const STATUS_INTERVAL = 10000;
+const STATUS_INTERVAL = 5000; // Poll status every 5s for real-time feel
 
 const BotStatus = () => {
     const [status, setStatus] = useState(null);
@@ -27,30 +26,8 @@ const BotStatus = () => {
         return () => clearInterval(interval);
     }, []);
 
-    // Push Bybit candle data from browser to backend every 60s
-    useEffect(() => {
-        const pushCandles = async () => {
-            try {
-                const url = 'https://api.bybit.com/v5/market/kline?category=linear&symbol=XAUUSDT&interval=360&limit=200';
-                const response = await fetch(url);
-                if (!response.ok) return;
-                const json = await response.json();
-                if (!json || json.retCode !== 0 || !json.result?.list) return;
+    // Server fetches Binance data directly — no browser relay needed
 
-                await fetch(`${API_BASE_URL}/bot/candles`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ candles: json.result.list })
-                });
-            } catch (err) {
-                // Silent — the bot's own fetch may work on some hosts
-            }
-        };
-
-        pushCandles();
-        const interval = setInterval(pushCandles, PUSH_INTERVAL);
-        return () => clearInterval(interval);
-    }, []);
 
     if (loading || !status) return <div className="bot-status-container">Loading bot status...</div>;
 
@@ -62,6 +39,11 @@ const BotStatus = () => {
             <div className="status-grid">
                 <div className="status-card">
                     <p><strong>Bot Status:</strong> <span className={bot.isRunning ? 'status-online' : 'status-offline'}>{bot.isRunning ? '🟡 ONLINE' : '🔴 OFFLINE'}</span></p>
+                    {bot.livePrice && (
+                        <p><strong>Live Price:</strong> <span style={{ color: '#4ade80', fontWeight: 'bold', fontSize: '1.1rem' }}>${Number(bot.livePrice).toFixed(2)}</span>
+                            {bot.livePriceTime && <span style={{ fontSize: '0.7rem', color: '#94a3b8', marginLeft: '8px' }}>({formatTimeIST(bot.livePriceTime, 'time')} IST)</span>}
+                        </p>
+                    )}
                     <p><strong>Daily Trade Taken:</strong> {bot.dailyTradeTaken ? '✅ Yes' : '❌ No'}</p>
                     <p><strong>Live Confluence:</strong> {bot.currentScore}/10 
                         <span style={{ fontSize: '0.8rem', marginLeft: '8px', color: bot.currentSignal === 'NEUTRAL' ? '#94a3b8' : (bot.currentSignal === 'BUY' ? '#4ade80' : '#f87171') }}>
@@ -72,6 +54,11 @@ const BotStatus = () => {
                     {bot.lastCandleTimestamp && (
                         <p style={{ fontSize: '0.8rem', color: '#cbd5e0' }}>
                             Last Candle: {formatTimeIST(bot.lastCandleTimestamp, 'date-time')} IST
+                        </p>
+                    )}
+                    {bot.currentFormingCandle && (
+                        <p style={{ fontSize: '0.8rem', color: '#fbbf24' }}>
+                            Forming: ${Number(bot.currentFormingCandle.price).toFixed(2)} at {formatTimeIST(bot.currentFormingCandle.time, 'time')} IST
                         </p>
                     )}
 

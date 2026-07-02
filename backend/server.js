@@ -9,6 +9,8 @@ const dotenv = require('dotenv');
 const schedule = require('node-schedule');
 const TradingBot = require('./tradingBot');
 const ExcelExport = require('./excelExport');
+const DailyOptimizer = require('./optimizer/dailyOptimizer');
+const optimizerConfig = require('./optimizer/config');
 const telegramService = require('./telegramService');
 
 dotenv.config();
@@ -38,6 +40,14 @@ const db = new sqlite3.Database('./trading.db', (err) => {
 
 // Initialize trading bot and pass DB instance
 const tradingBot = new TradingBot(db);
+
+// Initialize daily optimizer
+const dailyOptimizer = new DailyOptimizer(db, {
+    trainWindowDays: optimizerConfig.ML_FILTER.trainWindowDays,
+    validationWindowDays: optimizerConfig.ML_FILTER.validationWindowDays,
+    confidenceThreshold: optimizerConfig.ML_FILTER.confidenceThreshold,
+    minSamples: optimizerConfig.ML_FILTER.minSamples,
+});
 
 // Create tables
 db.serialize(() => {
@@ -109,6 +119,50 @@ db.serialize(() => {
     db.run(`CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)`);
 
+    // DataManager persistent candle cache table
+    db.run(`CREATE TABLE IF NOT EXISTS candles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT NOT NULL DEFAULT 'XAUUSDT',
+        interval TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        open REAL NOT NULL,
+        high REAL NOT NULL,
+        low REAL NOT NULL,
+        close REAL NOT NULL,
+        volume REAL NOT NULL,
+        source TEXT DEFAULT 'binance',
+        fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(symbol, interval, timestamp)
+    )`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_candles_symbol_interval ON candles(symbol, interval, timestamp)`);
+
+    // Optimizer tables
+    db.run(`CREATE TABLE IF NOT EXISTS optimizer_config (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        score REAL,
+        profit_factor REAL,
+        max_dd_pct REAL,
+        win_rate REAL,
+        trades INTEGER,
+        deployed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        is_active INTEGER DEFAULT 1
+    )`);
+    db.run(`CREATE TABLE IF NOT EXISTS optimizer_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        total_configs INTEGER,
+        best_pf REAL,
+        best_config TEXT,
+        best_score REAL,
+        ml_accuracy REAL,
+        ml_samples INTEGER,
+        deployed INTEGER DEFAULT 0,
+        improvement_pct REAL,
+        duration_seconds REAL
+    )`);
+
     // Load active trades into memory
     tradingBot.executionEngine.loadOpenTrades();
 });
@@ -138,10 +192,78 @@ wss.on('connection', (ws) => {
 });
 
 // ============================================================
-// BINANCE WEBSOCKET — Real-time XAU/USD Price Feed (NO DELAY)
-// Connects to Binance's public futures WebSocket for XAUUSDT ticker updates.
-// Binance does not block cloud server IPs like Bybit does.
+// BINANCE WEBSOCKET — Real-time XAU/USD Price Feed + Kline Streams
+// Price ticker for live price updates.
+// Kline streams for real-time candlestick chart updates (6H, 1m, 5m).
 // ============================================================
+let binanceKlineWs6h = null;
+let binanceKlineWs1m = null;
+let binanceKlineWs5m = null;
+let latestTickerPrice = null; // Real-time Binance ticker price
+
+const connectKlineStream = (interval, label) => {
+    const wsUrl = `wss://fstream.binance.com/ws/xauusdt@kline_${interval}`;
+    let pingInterval;
+    let reconnectTimeout;
+
+    const connect = () => {
+        console.log(`[KLINE-${label}] Connecting to ${wsUrl}...`);
+        const ws = new WebSocket(wsUrl);
+
+        ws.on('open', () => {
+            console.log(`✅ [KLINE-${label}] Connected — Real-time ${label} candle updates active`);
+            pingInterval = setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    try { ws.ping(); } catch {}
+                }
+            }, 25000);
+        });
+
+        ws.on('message', (data) => {
+            try {
+                const msg = JSON.parse(data);
+                if (!msg.k) return;
+
+                const kline = msg.k;
+                const candle = {
+                    time: Math.floor(kline.t / 1000),
+                    open: parseFloat(kline.o),
+                    high: parseFloat(kline.h),
+                    low: parseFloat(kline.l),
+                    close: parseFloat(kline.c),
+                    volume: parseFloat(kline.v),
+                    interval: interval,
+                    isFinal: kline.x, // true = candle closed, false = still forming
+                };
+
+                wss.clients.forEach((client) => {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify({
+                            type: 'kline',
+                            data: candle,
+                        }));
+                    }
+                });
+            } catch {}
+        });
+
+        ws.on('close', () => {
+            console.log(`[KLINE-${label}] Disconnected, reconnecting in 3s...`);
+            if (pingInterval) clearInterval(pingInterval);
+            reconnectTimeout = setTimeout(connect, 3000);
+        });
+
+        ws.on('error', (err) => {
+            console.error(`[KLINE-${label}] Error:`, err.message);
+            if (pingInterval) clearInterval(pingInterval);
+        });
+
+        return ws;
+    };
+
+    return connect();
+};
+
 const connectBybitWebSocket = () => {
     // Binance WebSocket — works from cloud servers (unlike Bybit)
     const wsUrl = 'wss://fstream.binance.com/ws/xauusdt@ticker';
@@ -170,8 +292,8 @@ const connectBybitWebSocket = () => {
             try {
                 const msg = JSON.parse(data);
                 
-                // Binance ticker format: {"s":"XAUUSDT","c":"4160.50","v":"12345.67",...}
-                if (msg.s !== 'XAUUSDT') return;
+                // Binance ticker format: {"e":"24hrTicker","s":"XAUUSDT","c":"4160.50",...}
+                if (!msg.s || msg.s !== 'XAUUSDT') return;
 
                 const price = parseFloat(msg.c);
                 if (!price || isNaN(price)) return;
@@ -183,9 +305,13 @@ const connectBybitWebSocket = () => {
                     symbol: 'XAUUSD',
                     price: price,
                     volume: volume,
-                    timestamp: timestamp
+                    timestamp: timestamp,
+                    _ts: Date.now()
                 };
 
+                latestTickerPrice = priceData; // Store latest for bot status (with _ts for freshness check)
+
+                // Broadcast to all frontend clients
                 wss.clients.forEach((client) => {
                     if (client.readyState === WebSocket.OPEN) {
                         client.send(JSON.stringify({
@@ -227,19 +353,143 @@ const connectBybitWebSocket = () => {
 
 connectBybitWebSocket();
 
+// Start kline streams for real-time charts
+binanceKlineWs6h = connectKlineStream('6h', '6H');
+binanceKlineWs1m = connectKlineStream('1m', '1m');
+binanceKlineWs5m = connectKlineStream('5m', '5m');
+
+// REST price poller — broadcasts real-time price to frontend clients every 2s
+setInterval(async () => {
+    try {
+        const resp = await fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=XAUUSDT');
+        if (resp.ok) {
+            const json = await resp.json();
+            const price = parseFloat(json.price);
+            if (price && isFinite(price)) {
+                const now = Date.now();
+                const priceData = {
+                    symbol: 'XAUUSD',
+                    price,
+                    volume: 0,
+                    timestamp: new Date().toISOString(),
+                    _ts: now
+                };
+                latestTickerPrice = priceData;
+                // Always broadcast to all connected frontend clients
+                wss.clients.forEach((client) => {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify({ type: 'price', data: priceData }));
+                    }
+                });
+            }
+        }
+    } catch {}
+}, 2000);
+
+// ═══════════════════════════════════════════════════════
+// SHARED PRICE FETCHER — always returns live Binance price
+// Falls back to WebSocket ticker (if fresh < 5s) else REST
+// ═══════════════════════════════════════════════════════
+async function fetchLivePrice() {
+    // Use WS ticker if it updated within last 5 seconds
+    if (latestTickerPrice && latestTickerPrice._ts && (Date.now() - latestTickerPrice._ts) < 5000) {
+        return latestTickerPrice;
+    }
+    try {
+        const resp = await fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=XAUUSDT');
+        if (resp.ok) {
+            const json = await resp.json();
+            const priceData = {
+                symbol: 'XAUUSD',
+                price: parseFloat(json.price),
+                timestamp: new Date().toISOString(),
+                _ts: Date.now(),
+                volume: 0
+            };
+            latestTickerPrice = priceData;
+            // Keep DB fresh (fire-and-forget)
+            db.run('INSERT INTO prices (symbol, price, volume) VALUES (?, ?, ?)',
+                ['XAUUSD', priceData.price, 0]);
+            return priceData;
+        }
+    } catch {}
+    return latestTickerPrice || { price: null };
+}
+
 // REST API endpoints
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
 });
 
-app.get('/api/price', (req, res) => {
-    db.get(`SELECT * FROM prices ORDER BY timestamp DESC LIMIT 1`, [], (err, row) => {
-        if (err) {
-            res.status(500).json({ error: err.message });
-            return;
+// Candle API — fetch candles from Binance REST (same source as trading bot)
+app.get('/api/candles', async (req, res) => {
+    try {
+        const interval = req.query.interval || '6H';
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 200, 1), 500);
+
+        // Map chart intervals to Binance kline intervals
+        const binanceMap = { '6H': '6h', '5min': '5m', '1min': '1m' };
+        const binInterval = binanceMap[interval] || '6h';
+
+        const url = `https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval=${binInterval}&limit=${limit}`;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Binance ${response.status}`);
+        const data = await response.json();
+        if (!data || !data.length) return res.json([]);
+
+        const candles = data
+            .map(c => ({
+                time: Math.floor(parseInt(c[0]) / 1000),
+                open: parseFloat(c[1]),
+                high: parseFloat(c[2]),
+                low: parseFloat(c[3]),
+                close: parseFloat(c[4]),
+                volume: parseFloat(c[5]),
+            }))
+            .sort((a, b) => a.time - b.time);
+
+        // Append live forming candle price if last candle is stale (>2min old for 1m, >30min for 6H)
+        const now = Date.now() / 1000;
+        const maxAge = interval === '1min' ? 120 : interval === '5min' ? 600 : 1800;
+        if (candles.length > 0) {
+            const last = candles[candles.length - 1];
+            const lastAge = now - last.time;
+            // Add a "current price" marker as the forming candle
+            const live = await fetchLivePrice().catch(() => null);
+            if (live && live.price && lastAge > maxAge) {
+                const binIntervalSec = { '6h': 21600, '5m': 300, '1m': 60 };
+                const intervalSec = binIntervalSec[binInterval] || 21600;
+                const currentCandleTime = Math.floor(now / intervalSec) * intervalSec;
+                if (currentCandleTime > last.time) {
+                    candles.push({
+                        time: currentCandleTime,
+                        open: last.close,
+                        high: live.price,
+                        low: live.price,
+                        close: live.price,
+                        volume: 0
+                    });
+                }
+            }
         }
-        res.json(row || {});
-    });
+
+        res.json(candles);
+    } catch (error) {
+        console.error('[Candles] Error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/price', async (req, res) => {
+    const priceData = await fetchLivePrice();
+    if (priceData && priceData.price) {
+        res.json(priceData);
+    } else {
+        db.get(`SELECT * FROM prices ORDER BY timestamp DESC LIMIT 1`, [], (err, row) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(row || {});
+        });
+    }
 });
 
 app.get('/api/prices', (req, res) => {
@@ -333,6 +583,14 @@ app.get('/api/bot/status', async (req, res) => {
     try {
         const status = tradingBot.getStatus();
         const recentTrades = await tradingBot.getRecentTrades(5);
+
+        // Always fetch fresh live price
+        const livePrice = await fetchLivePrice();
+        status.livePrice = livePrice ? livePrice.price : null;
+        status.livePriceTime = livePrice ? livePrice.timestamp : null;
+        status.currentFormingCandle = livePrice
+            ? { price: livePrice.price, time: livePrice.timestamp }
+            : null;
         
         const today = new Date().toISOString().split('T')[0];
         db.get("SELECT * FROM trades WHERE timestamp LIKE ? LIMIT 1", [`${today}%`], (err, row) => {
@@ -392,9 +650,9 @@ app.post('/api/bot/candles', async (req, res) => {
             return res.status(400).json({ error: 'Candle data is stale or has an invalid timestamp' });
         }
 
-        // Feed candle data to the bot for analysis
-        tradingBot.setPriceData(priceData, 'client_browser');
-        await tradingBot._analyzeAndTrade();
+        // Feed candle data to the bot (no analysis trigger — bot runs on its own timer)
+        tradingBot.setPriceData(priceData, 'browser_relay');
+        // Do NOT trigger _analyzeAndTrade — the bot's internal 60s timer handles that
 
         const status = tradingBot.getStatus();
         res.json({
@@ -614,26 +872,142 @@ app.post('/api/backtest/excel', async (req, res) => {
     }
 });
 
-// Manual Trading — always uses fixed 0.01 lot
+// ── Daily Optimizer API ──────────────────────────────────────────
+
+// Run optimizer manually
+app.post('/api/optimizer/run', async (req, res) => {
+    try {
+        console.log('[Optimizer] Manual optimization run triggered...');
+
+        // Fetch data via tradingBot's data pipeline
+        const backtestDays = req.body.days || 30;
+        const backtestResult = await tradingBot.runBacktest(backtestDays, 'default', null);
+
+        if (!backtestResult || !backtestResult.rawPriceData || backtestResult.rawPriceData.length < 50) {
+            return res.status(400).json({ error: 'Insufficient data for optimization' });
+        }
+
+        const priceData = backtestResult.rawPriceData || [];
+
+        // Fast backtest wrapper for optimizer
+        const runFastBacktest = async (data, params) => {
+            // Set env vars temporarily for this config
+            const origThreshold = process.env.CONFLUENCE_THRESHOLD;
+            const origSL = process.env.MAX_SL_DISTANCE;
+            const origTP1 = process.env.TP1_CLOSE_PERCENT;
+            const origScoreMargin = process.env.SCORE_MARGIN_MIN;
+            const origBuyMargin = process.env.BUY_SCORE_MARGIN;
+            const origEmaAlign = process.env.EMA_ALIGNMENT_REQUIRED;
+
+            process.env.CONFLUENCE_THRESHOLD = String(params.confluenceThreshold || 5.5);
+            process.env.MAX_SL_DISTANCE = String(params.maxSlDistance || 15);
+            process.env.TP1_CLOSE_PERCENT = String(params.tp1ClosePercent || 60);
+            process.env.SCORE_MARGIN_MIN = String(params.scoreMarginMin ?? 1.0);
+            process.env.BUY_SCORE_MARGIN = String(params.buyScoreMargin ?? 2.0);
+            process.env.EMA_ALIGNMENT_REQUIRED = String(params.emaAlignmentRequired ?? false);
+
+            // Clear module cache
+            Object.keys(require.cache).forEach(key => {
+                if (key.includes('unifiedStrategy') || key.includes('tradingBot') || key.includes('brokerSimulation') || key.includes('tradeEngine')) {
+                    delete require.cache[key];
+                }
+            });
+
+            const TradingBot = require('./tradingBot');
+            const bot = new TradingBot(db);
+            const result = await bot.runBacktest(backtestDays, 'default', null);
+
+            // Restore env
+            process.env.CONFLUENCE_THRESHOLD = origThreshold;
+            process.env.MAX_SL_DISTANCE = origSL;
+            process.env.TP1_CLOSE_PERCENT = origTP1;
+            process.env.SCORE_MARGIN_MIN = origScoreMargin;
+            process.env.BUY_SCORE_MARGIN = origBuyMargin;
+            process.env.EMA_ALIGNMENT_REQUIRED = origEmaAlign;
+
+            const trades = result.trades || [];
+            const wins = trades.filter(t => t.pnl > 0);
+            const losses = trades.filter(t => t.pnl <= 0);
+            const grossWins = wins.reduce((s, t) => s + t.pnl, 0);
+            const grossLosses = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+            const pf = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 999 : 0;
+            const wr = trades.length > 0 ? wins.length / trades.length : 0;
+            const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
+
+            let peak = 50, maxDD = 0, eq = 50;
+            for (const t of trades) {
+                eq += t.pnl;
+                if (eq > peak) peak = eq;
+                const dd = (peak - eq) / peak * 100;
+                if (dd > maxDD) maxDD = dd;
+            }
+
+            return {
+                trades,
+                equityCurve: result.equityCurve || [],
+                stats: {
+                    totalTrades: trades.length,
+                    winRate: wr,
+                    profitFactor: pf,
+                    totalPnl,
+                    maxDDPct: maxDD,
+                }
+            };
+        };
+
+        const result = await dailyOptimizer.optimize({
+            priceData,
+            runFastBacktest,
+            paramSpace: optimizerConfig,
+        });
+
+        res.json(result);
+    } catch (error) {
+        console.error('[Optimizer] Run error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get optimizer run history
+app.get('/api/optimizer/history', async (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 20;
+        const history = await dailyOptimizer.getHistory(limit);
+        const activeConfig = await dailyOptimizer.getActiveConfig();
+        res.json({ history, activeConfig });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get current active optimizer config
+app.get('/api/optimizer/config', async (req, res) => {
+    try {
+        const config = await dailyOptimizer.getActiveConfig();
+        res.json(config || { message: 'No optimized config deployed yet — using defaults' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 app.post('/api/manual-trade', async (req, res) => {
     try {
         const { action, quantity, userId } = req.body;
         const user = userId || 'default';
-        
-        db.get('SELECT price FROM prices ORDER BY timestamp DESC LIMIT 1', async (err, row) => {
-            if (err || !row) {
-                return res.status(500).json({ error: 'Could not get current gold price' });
-            }
-            
-            const signal = { action: action.toUpperCase(), price: row.price };
-            const result = await tradingBot.executionEngine.executeTrade(signal, 0.01, user, true);
-            
-            if (result.success) {
-                res.json(result);
-            } else {
-                res.status(400).json(result);
-            }
-        });
+
+        // Use live Binance price instead of stale DB
+        const live = await fetchLivePrice();
+        if (!live || !live.price) {
+            return res.status(500).json({ error: 'Could not get current gold price' });
+        }
+
+        const signal = { action: action.toUpperCase(), price: live.price };
+        const result = await tradingBot.executionEngine.executeTrade(signal, 0.01, user, true);
+
+        if (result.success) {
+            res.json(result);
+        } else {
+            res.status(400).json(result);
+        }
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -747,6 +1121,80 @@ schedule.scheduleJob('0 0 * * *', () => {
     console.log('[' + new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) + '] Daily trade lock reset');
     
     sendTelegramAlert('Gold bot: Daily trade lock reset — new trading day started');
+});
+
+// Daily optimizer auto-run at 01:00 UTC (off-session, quiet period)
+schedule.scheduleJob('0 1 * * *', async () => {
+    console.log('[Optimizer] Daily auto-optimization starting...');
+    try {
+        // Fetch fresh data
+        const backtestResult = await tradingBot.runBacktest(30, 'default', null);
+        if (!backtestResult || !backtestResult.rawPriceData || backtestResult.rawPriceData.length < 50) {
+            console.log('[Optimizer] Skipped — insufficient data');
+            return;
+        }
+
+        const priceData = backtestResult.rawPriceData || [];
+
+        const runFastBacktest = async (data, params) => {
+            const origThreshold = process.env.CONFLUENCE_THRESHOLD;
+            const origSL = process.env.MAX_SL_DISTANCE;
+            const origTP1 = process.env.TP1_CLOSE_PERCENT;
+
+            process.env.CONFLUENCE_THRESHOLD = String(params.confluenceThreshold || 5.5);
+            process.env.MAX_SL_DISTANCE = String(params.maxSlDistance || 15);
+            process.env.TP1_CLOSE_PERCENT = String(params.tp1ClosePercent || 60);
+
+            Object.keys(require.cache).forEach(key => {
+                if (key.includes('unifiedStrategy') || key.includes('tradingBot') || key.includes('brokerSimulation') || key.includes('tradeEngine')) {
+                    delete require.cache[key];
+                }
+            });
+
+            const TradingBot = require('./tradingBot');
+            const bot = new TradingBot(db);
+            const result = await bot.runBacktest(30, 'default', null);
+
+            process.env.CONFLUENCE_THRESHOLD = origThreshold;
+            process.env.MAX_SL_DISTANCE = origSL;
+            process.env.TP1_CLOSE_PERCENT = origTP1;
+
+            const trades = result.trades || [];
+            const wins = trades.filter(t => t.pnl > 0);
+            const losses = trades.filter(t => t.pnl <= 0);
+            const grossWins = wins.reduce((s, t) => s + t.pnl, 0);
+            const grossLosses = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+            const pf = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 999 : 0;
+            const wr = trades.length > 0 ? wins.length / trades.length : 0;
+
+            let peak = 50, maxDD = 0, eq = 50;
+            for (const t of trades) {
+                eq += t.pnl;
+                if (eq > peak) peak = eq;
+                const dd = (peak - eq) / peak * 100;
+                if (dd > maxDD) maxDD = dd;
+            }
+
+            return {
+                trades,
+                equityCurve: result.equityCurve || [],
+                stats: { totalTrades: trades.length, winRate: wr, profitFactor: pf, totalPnl: trades.reduce((s, t) => s + t.pnl, 0), maxDDPct: maxDD }
+            };
+        };
+
+        const result = await dailyOptimizer.optimize({ priceData, runFastBacktest, paramSpace: optimizerConfig });
+
+        if (result.success && result.deployed) {
+            console.log(`[Optimizer] Deployed new config: PF=${result.bestStats.profitFactor.toFixed(2)} WR=${(result.bestStats.winRate*100).toFixed(1)}% Score=${result.bestScore.toFixed(2)}`);
+            sendTelegramAlert(`Daily Optimizer: New config deployed\nPF: ${result.bestStats.profitFactor.toFixed(2)}\nWR: ${(result.bestStats.winRate*100).toFixed(1)}%\nImprovement: ${result.improvementOverCurrent}`);
+        } else if (result.success) {
+            console.log(`[Optimizer] No improvement over current config (${result.improvementOverCurrent})`);
+        } else {
+            console.log(`[Optimizer] Optimization failed: ${result.error}`);
+        }
+    } catch (err) {
+        console.error('[Optimizer] Auto-run error:', err.message);
+    }
 });
 
 // Telegram endpoints
