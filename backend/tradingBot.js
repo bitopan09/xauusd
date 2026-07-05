@@ -60,6 +60,27 @@ class TradingBot {
         this.volatileCooloff = 0;
         this.optimizerParams = null; // Loaded from DB on startup
 
+        // ═══════════════════════════════════════════════════════════════
+        // ENHANCED RISK MANAGEMENT (v2 upgrades)
+        // ═══════════════════════════════════════════════════════════════
+        // Intraday loss cap — stops trading after this many consecutive losses
+        this.INTRADAY_LOSS_CAP = Number(process.env.INTRADAY_LOSS_CAP) || 3;
+        // Consecutive intraday losses counter
+        this.intradayLossStreak = 0;
+
+        // Volatility-based position sizing — scale lot size inverse to ATR
+        this.VOLATILITY_SCALING = process.env.VOLATILITY_SCALING !== 'false';
+        this.ATR_LOOKBACK = Number(process.env.ATR_LOOKBACK) || 14;
+        this.BASE_ATR_PERCENT = Number(process.env.BASE_ATR_PERCENT) || 0.5; // ATR as % of price for "normal" vol
+        this.MIN_LOT_MULTIPLIER = Number(process.env.MIN_LOT_MULTIPLIER) || 0.5; // Min 50% of base lot
+        this.MAX_LOT_MULTIPLIER = Number(process.env.MAX_LOT_MULTIPLIER) || 2.0; // Max 200% of base lot
+
+        // Black swan protection — emergency exit on extreme moves
+        this.BLACK_SWAN_SIGMA = Number(process.env.BLACK_SWAN_SIGMA) || 3; // 3σ move triggers protection
+        this.BLACK_SWAN_LOOKBACK = Number(process.env.BLACK_SWAN_LOOKBACK) || 20;
+        this.blackSwanActive = false;
+        this.blackSwanReason = null;
+
         this._initializePriceData();
         this._loadOptimizerConfig();
     }
@@ -289,6 +310,15 @@ class TradingBot {
 
             // If decision is to trade, execute it
             if (decision.action === 'BUY' || decision.action === 'SELL') {
+                // PAPER TRADING MODE — simulate without real execution
+                if (process.env.PAPER_TRADING === 'true') {
+                    const currentPrice = this.priceData[this.priceData.length - 1].price;
+                    console.log(`[PAPER] ${decision.action} signal at $${currentPrice.toFixed(2)} — NOT executing (paper mode)`);
+                    console.log(`[PAPER] Would execute: qty=${quantity}, SL=$${decision.action === 'BUY' ? riskParams.stopLoss.long : riskParams.stopLoss.short}`);
+                    this.decisionEngine.dailyTradeTaken = true; // Count as trade for rate limiting
+                    return;
+                }
+
                 const currentPrice = this.priceData[this.priceData.length - 1].price;
                 const riskParams = decision.details.analysis.riskCalculator;
                 const sl = decision.action === 'BUY' ? riskParams.stopLoss.long : riskParams.stopLoss.short;
@@ -888,6 +918,129 @@ class TradingBot {
             volume: parseFloat(k[5] || 0),
             price: parseFloat(k[4])
         }));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ENHANCED RISK MANAGEMENT METHODS (v2)
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Calculate volatility-based lot multiplier
+     * @param {Array} priceData - Recent price data for ATR calculation
+     * @returns {number} Lot multiplier (0.5 - 2.0)
+     */
+    getVolatilityMultiplier(priceData) {
+        if (!this.VOLATILITY_SCALING || !priceData || priceData.length < this.ATR_LOOKBACK + 1) {
+            return 1.0;
+        }
+        try {
+            // Calculate ATR
+            const closes = priceData.map(p => p.close || p.price);
+            const atr = this._calculateATR(closes, this.ATR_LOOKBACK);
+            const currentPrice = closes[closes.length - 1];
+            const atrPercent = (atr / currentPrice) * 100;
+
+            // Lower volatility = larger lot (inverse)
+            // If ATR% is 0.5% (base), multiplier = 1.0
+            // If ATR% is 1.0% (high), multiplier = 0.5
+            // If ATR% is 0.25% (low), multiplier = 2.0
+            const ratio = this.BASE_ATR_PERCENT / atrPercent;
+            let multiplier = Math.max(this.MIN_LOT_MULTIPLIER, Math.min(this.MAX_LOT_MULTIPLIER, ratio));
+
+            console.log(`[Risk] ATR: ${atr.toFixed(2)} (${atrPercent.toFixed(3)}%) → Lot multiplier: ${multiplier.toFixed(2)}`);
+            return multiplier;
+        } catch (e) {
+            console.warn('[Risk] Volatility calculation failed:', e.message);
+            return 1.0;
+        }
+    }
+
+    /**
+     * Calculate ATR for a series of closing prices
+     */
+    _calculateATR(closes, period = 14) {
+        if (!closes || closes.length < period + 1) return 0;
+        const trs = [];
+        for (let i = 1; i < closes.length; i++) {
+            const tr = Math.abs(closes[i] - closes[i - 1]);
+            trs.push(tr);
+        }
+        if (trs.length < period) return 0;
+        const recentTRs = trs.slice(-period);
+        return recentTRs.reduce((a, b) => a + b, 0) / period;
+    }
+
+    /**
+     * Check for black swan conditions — extreme moves that warrant skipping trades
+     * @param {Array} priceData - Recent price data
+     * @param {number} currentPrice - Current price
+     * @returns {Object} { isBlackSwan: boolean, reason: string|null }
+     */
+    checkBlackSwan(priceData, currentPrice) {
+        if (!priceData || priceData.length < this.BLACK_SWAN_LOOKBACK + 1) {
+            return { isBlackSwan: false, reason: null };
+        }
+
+        try {
+            const closes = priceData.slice(-this.BLACK_SWAN_LOOKBACK).map(p => p.close || p.price);
+            const mean = closes.reduce((a, b) => a + b, 0) / closes.length;
+            const variance = closes.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / closes.length;
+            const stdDev = Math.sqrt(variance);
+
+            if (stdDev === 0) return { isBlackSwan: false, reason: null };
+
+            const zScore = Math.abs((currentPrice - mean) / stdDev);
+
+            if (zScore > this.BLACK_SWAN_SIGMA) {
+                const direction = currentPrice > mean ? 'SPIKE_UP' : 'SPIKE_DOWN';
+                const reason = `Black swan detected: ${zScore.toFixed(1)}σ move (${direction})`;
+                console.warn(`[Risk] ⚠️ ${reason}`);
+                return { isBlackSwan: true, reason };
+            }
+
+            return { isBlackSwan: false, reason: null };
+        } catch (e) {
+            return { isBlackSwan: false, reason: null };
+        }
+    }
+
+    /**
+     * Update intraday loss streak — call after each losing trade
+     */
+    recordIntradayLoss() {
+        this.intradayLossStreak++;
+        console.log(`[Risk] Intraday loss #${this.intradayLossStreak} (cap: ${this.INTRADAY_LOSS_CAP})`);
+
+        if (this.intradayLossStreak >= this.INTRADAY_LOSS_CAP) {
+            console.warn(`[Risk] 🚫 INTRADAY LOSS CAP REACHED — Stopping trading for today`);
+        }
+    }
+
+    /**
+     * Reset intraday loss streak — call after each winning trade
+     */
+    recordIntradayWin() {
+        if (this.intradayLossStreak > 0) {
+            console.log(`[Risk] Intraday win — resetting loss streak from ${this.intradayLossStreak} to 0`);
+            this.intradayLossStreak = 0;
+        }
+    }
+
+    /**
+     * Check if trading should be allowed based on all risk rules
+     */
+    canTrade() {
+        // Intraday loss cap check
+        if (this.intradayLossStreak >= this.INTRADAY_LOSS_CAP) {
+            return { allowed: false, reason: `Intraday loss cap reached (${this.intradayLossStreak}/${this.INTRADAY_LOSS_CAP})` };
+        }
+
+        // Black swan check
+        if (this.blackSwanActive) {
+            return { allowed: false, reason: `Black swan active: ${this.blackSwanReason}` };
+        }
+
+        return { allowed: true, reason: null };
     }
 
 

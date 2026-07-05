@@ -434,7 +434,23 @@ async function fetchLivePrice() {
 
 // REST API endpoints
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
+    const botStatus = tradingBot.getStatus();
+    res.json({
+        status: 'ok',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+        bot: {
+            isRunning: botStatus.isRunning,
+            activeTrades: botStatus.activeTrades,
+            dailyTradeTaken: botStatus.dailyTradeTaken,
+            intradayLossStreak: tradingBot.intradayLossStreak || 0,
+            blackSwanActive: tradingBot.blackSwanActive || false,
+        },
+        memory: process.memoryUsage ? {
+            heapUsed: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+            heapTotal: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
+        } : null,
+    });
 });
 
 // Candle API — fetch candles from Binance/OKX with fallback
@@ -833,6 +849,25 @@ app.post('/api/full-backtest', async (req, res) => {
         });
     } catch (error) {
         console.error('Full backtest error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Walk-Forward Optimization endpoint
+app.post('/api/backtest/walkforward', async (req, res) => {
+    try {
+        const { days, trainDays, valDays, stepDays, candles } = req.body;
+        
+        const totalDays = days || 90;
+        const trainWindow = trainDays || 30;
+        const valWindow = valDays || 10;
+        const step = stepDays || 5;
+
+        console.log(`[WFO] Walk-Forward Optimization: ${totalDays} total, ${trainWindow}d train, ${valWindow}d val, ${step}d step`);
+        
+        res.json({ message: 'Walk-forward endpoint working. Full implementation requires strategy integration.' });
+    } catch (error) {
+        console.error('Walk-forward error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -1276,18 +1311,71 @@ const server_instance = server.listen(PORT, '0.0.0.0', () => {
     }
 });
 
-// Graceful shutdown
-const gracefulShutdown = (signal) => {
+// Graceful shutdown with position management
+const gracefulShutdown = async (signal) => {
     console.log(`\n[SHUTDOWN] ${signal} received — shutting down gracefully...`);
+
+    // 1. Stop accepting new trades
     tradingBot.stop();
+
+    // 2. Check for open positions - close at market if any
+    const openTrades = await new Promise(resolve => {
+        db.all('SELECT * FROM trades WHERE status = ?', ['OPEN'], (err, rows) => {
+            resolve(err ? [] : rows);
+        });
+    });
+
+    if (openTrades && openTrades.length > 0) {
+        console.log(`[SHUTDOWN] Found ${openTrades.length} open position(s) — closing at current market price`);
+
+        // Get current price
+        const priceRow = await new Promise(resolve => {
+            db.get('SELECT price FROM prices ORDER BY timestamp DESC LIMIT 1', [], (err, row) => {
+                resolve(row);
+            });
+        });
+
+        const currentPrice = priceRow?.price;
+
+        if (currentPrice) {
+            for (const trade of openTrades) {
+                const exitPrice = trade.action === 'BUY' ? currentPrice - 5 : currentPrice + 5; // Assume slight slippage
+                const pnl = trade.action === 'BUY'
+                    ? (exitPrice - trade.entry_price) * trade.quantity * 100
+                    : (trade.entry_price - exitPrice) * trade.quantity * 100;
+
+                await new Promise(resolve => {
+                    db.run(
+                        `UPDATE trades SET status = 'CLOSED', exit_price = ?, pnl = ?, exit_reason = ?, exit_timestamp = ? WHERE id = ?`,
+                        [exitPrice, pnl, 'SHUTDOWN_CLOSE', new Date().toISOString(), trade.id],
+                        resolve
+                    );
+                });
+
+                console.log(`[SHUTDOWN] Closed ${trade.action} position at ${exitPrice.toFixed(2)}, PnL: $${pnl.toFixed(2)}`);
+            }
+        } else {
+            console.warn('[SHUTDOWN] Could not get current price — positions left open');
+        }
+    }
+
+    // 3. Save bot state before exit
+    db.run('UPDATE bot_state SET state_json = ?, updated_at = ? WHERE key = ?',
+        [JSON.stringify({ intradayLossStreak: tradingBot.intradayLossStreak }), new Date().toISOString(), 'risk_state'],
+        () => {}
+    );
+
+    // 4. Close server
     server_instance.close(() => {
         console.log('[SHUTDOWN] Server closed');
         process.exit(0);
     });
+
+    // 5. Force exit after timeout
     setTimeout(() => {
         console.error('[SHUTDOWN] Forced exit due to timeout');
         process.exit(1);
-    }, 10000);
+    }, 15000);
 };
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));

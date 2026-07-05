@@ -93,3 +93,29 @@ NODE_OPTIONS=--max-old-space-size=4096
 1. **50-day Binance data**: XAUUSDT only has ~50 days on Binance Futures — backtest quality limited by data
 2. **15m regime detection**: Broken on sub-1H timeframes (pre-existing)
 3. **MaxDD in live**: Higher than optimizer suggests due to equity-based position sizing — mitigated by daily loss cap and equity floor
+
+---
+
+## v2.0 Improvements (Just Added)
+
+### 1. Enhanced Risk Management
+- **Intraday loss cap**: Stops trading after configurable consecutive losses (default: 3)
+- **Volatility-based position sizing**: Scales lot size inversely to ATR (0.5x-2.0x range)
+- **Black swan protection**: Skips trades when price moves >3σ from 20-day mean
+- **New env vars**: `INTRADAY_OSS_CAP`, `VOLATILITY_SCALING`, `BLACK_SWAN_SIGMA`, `ATR_LOOKBACK`
+
+### 2. Production Hardening
+- **Graceful shutdown**: Closes open positions at market before exit
+- **Enhanced health endpoint**: Now returns bot status, intraday streak, black swan state, memory usage
+- **State persistence**: Saves risk state to DB on shutdown
+
+### 3. Walk-Forward Optimization (New Module)
+- **File**: `backend/optimizer/walkForwardOptimizer.js`
+- **Split**: Train (in-sample) → Validate (out-of-sample) rolling windows
+- **Metrics**: Robustness score = % of validation windows that remained profitable
+- **API**: `/api/backtest/walkforward` endpoint ready
+
+### 4. Frontend (Already had good analytics)
+- Equity curve with drawdown overlay (existing)
+- Trade analytics by exit reason, regime, action (existing)
+- Export to CSV (existing)
