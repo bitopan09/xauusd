@@ -495,9 +495,39 @@ class TradingBot {
             }
 
             // Use DataManager for multi-source fetching (Binance → OKX → cache)
-            if (!historicalData) {
-                console.log('Fetching XAU/USD candles via DataManager (Binance → OKX → cache)...');
-                historicalData = await this.dataManager.getHistoricalData(requiredCandles, backtestInterval, anchoredEnd.getTime(), clientCandles);
+                        if (!historicalData) {
+                            console.log('Fetching XAU/USD candles via DataManager (Binance → OKX → cache)...');
+                
+                            // Try DataManager first
+                            if (this.dataManager && this.dataManager.getHistoricalData) {
+                                historicalData = await this.dataManager.getHistoricalData(requiredCandles, backtestInterval, anchoredEnd.getTime(), clientCandles);
+                            }
+                
+                            // FALLBACK: Direct Binance fetch if DataManager fails
+                            if (!historicalData || historicalData.length === 0) {
+                                console.log('⚠ DataManager failed, using direct Binance fetch...');
+                                const fetch = require('node-fetch');
+                                const binanceUrl = `https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval=6h&limit=${Math.min(500, 1500)}`;
+                                try {
+                                    const res = await fetch(binanceUrl);
+                                    const data = await res.json();
+                                    if (Array.isArray(data) && data.length > 0) {
+                                        historicalData = data.reverse().map(k => ({
+                                            timestamp: new Date(parseInt(k[0])),
+                                            open: parseFloat(k[1]),
+                                            high: parseFloat(k[2]),
+                                            low: parseFloat(k[3]),
+                                            close: parseFloat(k[4]),
+                                            volume: parseFloat(k[5]),
+                                            source: 'binance-direct'
+                                        }));
+                                        console.log(`✓ Direct Binance: ${historicalData.length} candles loaded`);
+                                    }
+                                } catch (e) {
+                                    console.error('Binance fallback failed:', e.message);
+                                }
+                            }
+                        }
 
                 if (historicalData && historicalData.length > 0) {
                     dataSource = historicalData[0]?.source || 'datamanager';
