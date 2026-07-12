@@ -384,13 +384,21 @@ async function fetchCandlesWithFallback(interval, limit) {
     const binInt = binMap[interval] || '6h';
     const okxMap = { '6H': '6H', '5min': '5m', '1min': '1m' };
     const okxInt = okxMap[interval] || '6H';
+    // Try Binance first
     try {
         const r = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval=${binInt}&limit=${limit}`, { headers: UA, timeout: 8000 });
         if (r.ok) { const d = await r.json(); if (Array.isArray(d) && d.length) return d.map(c => ({ time: Math.floor(parseInt(c[0])/1000), open: parseFloat(c[1]), high: parseFloat(c[2]), low: parseFloat(c[3]), close: parseFloat(c[4]), volume: parseFloat(c[5]) })).sort((a,b) => a.time - b.time); }
     } catch {}
+    // Fallback to OKX
     try {
         const r = await fetch(`https://www.okx.com/api/v5/market/candles?instId=XAU-USDT-SWAP&bar=${okxInt}&limit=${limit}`, { headers: UA, timeout: 8000 });
         if (r.ok) { const d = await r.json(); if (d.code === '0' && d.data?.length) return d.data.reverse().map(c => ({ time: Math.floor(parseInt(c[0])/1000), open: parseFloat(c[1]), high: parseFloat(c[2]), low: parseFloat(c[3]), close: parseFloat(c[4]), volume: parseFloat(c[5]||0) })).sort((a,b) => a.time - b.time); }
+    } catch {}
+    // Fallback to Bybit (works from cloud servers, no CORS)
+    try {
+        const bybitInt = interval === '6H' ? '360' : interval === '5min' ? '5' : '1';
+        const r = await fetch(`https://api.bybit.com/v5/market/kline?category=linear&symbol=XAUUSDT&interval=${bybitInt}&limit=${limit}`, { headers: UA, timeout: 8000 });
+        if (r.ok) { const d = await r.json(); if (d.retCode === 0 && d.result?.list?.length) return d.result.list.reverse().map(c => ({ time: Math.floor(parseInt(c[0])/1000), open: parseFloat(c[1]), high: parseFloat(c[2]), low: parseFloat(c[3]), close: parseFloat(c[4]), volume: parseFloat(c[5]||0) })).sort((a,b) => a.time - b.time); }
     } catch {}
     return null;
 }

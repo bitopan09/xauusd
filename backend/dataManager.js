@@ -107,6 +107,17 @@ class DataManager {
             console.warn(`[DataManager] OKX fetch failed: ${err.message}`);
         }
 
+        // Priority 5: Bybit REST (works from cloud servers, no IP blocks)
+        try {
+            const bybitData = await this._fetchBybit(interval, requiredCount, endTimeMs);
+            if (bybitData && bybitData.length >= requiredCount * 0.5) {
+                console.log(`[DataManager] Fetched ${bybitData.length} candles from Bybit`);
+                return bybitData;
+            }
+        } catch (err) {
+            console.warn(`[DataManager] Bybit fetch failed: ${err.message}`);
+        }
+
         return null;
     }
 
@@ -247,6 +258,58 @@ class DataManager {
             volume: parseFloat(c[5]),
             price: parseFloat(c[4]),
             source: 'okx',
+        }));
+    }
+
+    /**
+     * Fetch candles from Bybit REST API (works from cloud servers).
+     * Bybit interval: 360 = 6H, 15 = 15m, 5 = 5m, 1 = 1m
+     */
+    async _fetchBybit(interval, requiredCount, endTimeMs) {
+        const bybitInterval = { '360': '360', '6h': '360', '15': '15', '15m': '15', '5': '5', '5m': '5', '1': '1', '1m': '1' };
+        const byInt = bybitInterval[interval] || '360';
+        const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=XAUUSDT&interval=${byInt}&limit=200`;
+        let end = endTimeMs || Date.now();
+        let allCandles = [];
+        let remaining = requiredCount;
+
+        while (remaining > 0) {
+            const chunkLimit = Math.min(remaining, 200);
+            const fetchUrl = `${url}&limit=${chunkLimit}&end=${end}`;
+
+            try {
+                const response = await fetch(fetchUrl, {
+                    headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+                    timeout: 15000
+                });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const json = await response.json();
+                if (json.retCode !== 0 || !json.result?.list || json.result.list.length === 0) break;
+                const data = json.result.list;
+                allCandles = allCandles.concat(data);
+                end = parseInt(data[0][0]) - 1;
+                remaining -= chunkLimit;
+            } catch (err) {
+                console.error(`[DataManager] Bybit chunk fetch error: ${err.message}`);
+                break;
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 200));
+        }
+
+        if (allCandles.length === 0) return null;
+
+        allCandles.sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
+
+        return allCandles.map(k => ({
+            timestamp: new Date(parseInt(k[0])),
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+            volume: parseFloat(k[5]),
+            price: parseFloat(k[4]),
+            source: 'bybit',
         }));
     }
 
