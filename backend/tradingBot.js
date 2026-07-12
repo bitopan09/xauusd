@@ -641,25 +641,30 @@ class TradingBot {
             }
 
             // Initialize simulation — unified TradeEngine
-            const UnifiedStrategy = require('./unifiedStrategyV3');
+            // Reuse the live bot's strategy instance so backtest matches live trading exactly
             const BrokerSimulation = require('./brokerSimulation');
             const TradeEngine = require('./tradeEngine');
 
-            const uStrategy = new UnifiedStrategy({
-                tp1RR: Number(process.env.TP1_RR) || undefined,
-                tp2RR: Number(process.env.TP2_RR) || undefined,
-                confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || undefined,
-                tp1ClosePercent: Number(process.env.TP1_CLOSE_PERCENT) || undefined,
-                maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || undefined,
-                scoreMarginMin: Number(process.env.SCORE_MARGIN_MIN) || undefined,
-                buyScoreMargin: Number(process.env.BUY_SCORE_MARGIN) || undefined,
-                emaAlignmentRequired: process.env.EMA_ALIGNMENT_REQUIRED === 'true' || undefined,
-                zlemaRequired: process.env.ZLEMA_REQUIRED === 'true' || undefined,
-                zlemaEntryRequired: process.env.ZLEMA_ENTRY_REQUIRED !== 'false',
-                zlemaLength: Number(process.env.ZLEMA_LENGTH) || undefined,
-                zlemaMult: Number(process.env.ZLEMA_MULT) || undefined,
-                interval: backtestInterval || 360,
-            });
+            // Clone the live strategy's current config to ensure backtest uses identical parameters
+            const liveStrategy = this.decisionEngine?.analysisEngine?.strategy;
+            const uStrategy = liveStrategy || (() => {
+                const UnifiedStrategy = require('./unifiedStrategyV3');
+                return new UnifiedStrategy({
+                    tp1RR: Number(process.env.TP1_RR) || undefined,
+                    tp2RR: Number(process.env.TP2_RR) || undefined,
+                    confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || undefined,
+                    tp1ClosePercent: Number(process.env.TP1_CLOSE_PERCENT) || undefined,
+                    maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || undefined,
+                    scoreMarginMin: Number(process.env.SCORE_MARGIN_MIN) || undefined,
+                    buyScoreMargin: Number(process.env.BUY_SCORE_MARGIN) || undefined,
+                    emaAlignmentRequired: process.env.EMA_ALIGNMENT_REQUIRED === 'true' || undefined,
+                    zlemaRequired: process.env.ZLEMA_REQUIRED === 'true' || undefined,
+                    zlemaEntryRequired: process.env.ZLEMA_ENTRY_REQUIRED === 'true',
+                    zlemaLength: Number(process.env.ZLEMA_LENGTH) || undefined,
+                    zlemaMult: Number(process.env.ZLEMA_MULT) || undefined,
+                    interval: backtestInterval || 360,
+                });
+            })();
             const broker = new BrokerSimulation();
             const tradeEngine = new TradeEngine({ strategy: uStrategy, broker, config: {
                 sessionStartMin: 6 * 60,   // 06:00 UTC
