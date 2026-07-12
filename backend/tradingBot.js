@@ -111,11 +111,63 @@ class TradingBot {
                     this.optimizerParams = config;
                     console.log(`[Bot] Loaded optimizer config: PF=${row.profit_factor?.toFixed(2)} WR=${(row.win_rate*100)?.toFixed(1)}% Score=${row.score?.toFixed(2)}`);
                     console.log(`[Bot] Optimized params:`, config);
+                    this._applyOptimizerParams(config);
                 } catch (e) {
                     console.warn('[Bot] Failed to parse optimizer config:', e.message);
                 }
             }
         );
+    }
+
+    /**
+     * Apply loaded optimizer params to process.env and live strategy instances.
+     * Ensures DecisionEngine and ExecutionEngine use the DB-deployed config.
+     */
+    _applyOptimizerParams(config) {
+        if (!config) return;
+
+        // Patch process.env for any late consumers
+        if (config.confluenceThreshold !== undefined) {
+            process.env.CONFLUENCE_THRESHOLD = String(config.confluenceThreshold);
+        }
+        if (config.tp1ClosePercent !== undefined) {
+            process.env.TP1_CLOSE_PERCENT = String(config.tp1ClosePercent);
+        }
+        if (config.maxSlDistance !== undefined) {
+            process.env.MAX_SL_DISTANCE = String(config.maxSlDistance);
+        }
+        if (config.scoreMarginMin !== undefined) {
+            process.env.SCORE_MARGIN_MIN = String(config.scoreMarginMin);
+        }
+        if (config.buyScoreMargin !== undefined) {
+            process.env.BUY_SCORE_MARGIN = String(config.buyScoreMargin);
+        }
+        if (config.emaAlignmentRequired !== undefined) {
+            process.env.EMA_ALIGNMENT_REQUIRED = String(config.emaAlignmentRequired);
+        }
+
+        const patchStrategy = (strategy) => {
+            if (!strategy) return;
+            if (config.confluenceThreshold !== undefined) strategy.CONFLUENCE_THRESHOLD = config.confluenceThreshold;
+            if (config.tp1ClosePercent !== undefined) strategy.TP1_CLOSE_PERCENT = config.tp1ClosePercent;
+            if (config.maxSlDistance !== undefined) strategy.MAX_SL_DISTANCE = config.maxSlDistance;
+            if (config.scoreMarginMin !== undefined) strategy.SCORE_MARGIN_MIN = config.scoreMarginMin;
+            if (config.buyScoreMargin !== undefined) strategy.BUY_SCORE_MARGIN = config.buyScoreMargin;
+            if (config.emaAlignmentRequired !== undefined) strategy.EMA_ALIGNMENT_REQUIRED = config.emaAlignmentRequired;
+            if (config.zlemaRequired !== undefined) strategy.ZLEMA_REQUIRED = config.zlemaRequired;
+            if (config.zlemaEntryRequired !== undefined) strategy.ZLEMA_ENTRY_REQUIRED = config.zlemaEntryRequired;
+        };
+
+        // Patch decision engine strategy
+        if (this.decisionEngine?.analysisEngine?.strategy) {
+            patchStrategy(this.decisionEngine.analysisEngine.strategy);
+        }
+        // Patch execution engine strategy
+        if (this.executionEngine?.strategy) {
+            patchStrategy(this.executionEngine.strategy);
+        }
+
+        console.log(`[Bot] Applied optimizer params to live strategy instances`);
     }
 
     setPriceData(priceData, source = 'unknown') {
@@ -274,17 +326,9 @@ class TradingBot {
                 return;
             }
 
-            // Apply optimizer config if available (overrides env defaults)
+            // Ensure optimizer config is applied to live strategy instances
             if (this.optimizerParams) {
-                if (this.optimizerParams.confluenceThreshold) {
-                    process.env.CONFLUENCE_THRESHOLD = String(this.optimizerParams.confluenceThreshold);
-                }
-                if (this.optimizerParams.tp1ClosePercent) {
-                    process.env.TP1_CLOSE_PERCENT = String(this.optimizerParams.tp1ClosePercent);
-                }
-                if (this.optimizerParams.maxSlDistance) {
-                    process.env.MAX_SL_DISTANCE = String(this.optimizerParams.maxSlDistance);
-                }
+                this._applyOptimizerParams(this.optimizerParams);
             }
 
             // Perform analysis and make decision (MTF if 15m data available)
