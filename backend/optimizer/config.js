@@ -53,6 +53,35 @@ module.exports = {
             default: false,
             description: 'Require EMA 9/21 alignment for BUY entries',
         },
+        // V5: Zero-Lag Trend (ZLEMA) parameters
+        zlemaRequired: {
+            name: 'zlemaRequired',
+            values: [false, true],
+            type: 'boolean',
+            default: false,
+            description: 'Require ZLEMA trend alignment for all entries',
+        },
+        zlemaEntryRequired: {
+            name: 'zlemaEntryRequired',
+            values: [true, false],
+            type: 'boolean',
+            default: true,
+            description: 'Require ZLEMA entry signal (crossover + trend confirm)',
+        },
+        zlemaLength: {
+            name: 'zlemaLength',
+            values: [50, 70, 90],
+            type: 'discrete',
+            default: 70,
+            description: 'ZLEMA lookback length',
+        },
+        zlemaMult: {
+            name: 'zlemaMult',
+            values: [1.0, 1.2, 1.5],
+            type: 'continuous',
+            default: 1.2,
+            description: 'ZLEMA volatility band multiplier',
+        },
     },
 
     // ML Signal Filter Configuration

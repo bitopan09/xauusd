@@ -929,6 +929,10 @@ app.post('/api/optimizer/run', async (req, res) => {
             const origScoreMargin = process.env.SCORE_MARGIN_MIN;
             const origBuyMargin = process.env.BUY_SCORE_MARGIN;
             const origEmaAlign = process.env.EMA_ALIGNMENT_REQUIRED;
+            const origZlemaRequired = process.env.ZLEMA_REQUIRED;
+            const origZlemaEntry = process.env.ZLEMA_ENTRY_REQUIRED;
+            const origZlemaLength = process.env.ZLEMA_LENGTH;
+            const origZlemaMult = process.env.ZLEMA_MULT;
 
             process.env.CONFLUENCE_THRESHOLD = String(params.confluenceThreshold || 5.5);
             process.env.MAX_SL_DISTANCE = String(params.maxSlDistance || 15);
@@ -936,6 +940,10 @@ app.post('/api/optimizer/run', async (req, res) => {
             process.env.SCORE_MARGIN_MIN = String(params.scoreMarginMin ?? 1.0);
             process.env.BUY_SCORE_MARGIN = String(params.buyScoreMargin ?? 2.0);
             process.env.EMA_ALIGNMENT_REQUIRED = String(params.emaAlignmentRequired ?? false);
+            process.env.ZLEMA_REQUIRED = String(params.zlemaRequired ?? false);
+            process.env.ZLEMA_ENTRY_REQUIRED = String(params.zlemaEntryRequired ?? true);
+            process.env.ZLEMA_LENGTH = String(params.zlemaLength ?? 70);
+            process.env.ZLEMA_MULT = String(params.zlemaMult ?? 1.2);
 
             // Clear module cache
             Object.keys(require.cache).forEach(key => {
@@ -949,12 +957,16 @@ app.post('/api/optimizer/run', async (req, res) => {
             const result = await bot.runBacktest(backtestDays, 'default', null);
 
             // Restore env
-            process.env.CONFLUENCE_THRESHOLD = origThreshold;
+process.env.CONFLUENCE_THRESHOLD = origThreshold;
             process.env.MAX_SL_DISTANCE = origSL;
             process.env.TP1_CLOSE_PERCENT = origTP1;
             process.env.SCORE_MARGIN_MIN = origScoreMargin;
             process.env.BUY_SCORE_MARGIN = origBuyMargin;
             process.env.EMA_ALIGNMENT_REQUIRED = origEmaAlign;
+            process.env.ZLEMA_REQUIRED = origZlemaRequired;
+            process.env.ZLEMA_ENTRY_REQUIRED = origZlemaEntry;
+            process.env.ZLEMA_LENGTH = origZlemaLength;
+            process.env.ZLEMA_MULT = origZlemaMult;
 
             const trades = result.trades || [];
             const wins = trades.filter(t => t.pnl > 0);

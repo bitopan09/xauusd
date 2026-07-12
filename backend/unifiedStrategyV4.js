@@ -268,10 +268,98 @@ class UnifiedStrategy {
         for (let i = period; i < dxValues.length; i++) {
             adx = (adx * (period - 1) + dxValues[i]) / period;
         }
-        return adx;
+return adx;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
+    // ZERO LAG TREND INDICATOR (from Pine Script)
+    // ═══════════════════════════════════════════════════════════════
+    // Parameters: length=70, multiplier=1.2 (from user's Pine Script)
+    calculateZeroLagEma(closes, length = 70, mult = 1.2) {
+        if (!closes || closes.length < length + 1) {
+            return { zlema: null, upperBand: null, lowerBand: null, trend: 0 };
+        }
+
+        const lag = Math.floor((length - 1) / 2);
+        const src = closes;
+
+        // Zero Lag EMA: EMA(src + (src - src[lag]))
+        const zlemaData = [];
+        const k = 2 / (length + 1);
+
+        for (let i = 0; i < src.length; i++) {
+            const adjustedSrc = src[i] + (src[i] - (i >= lag ? src[i - lag] : src[0]));
+            if (i === 0) {
+                zlemaData.push(adjustedSrc);
+            } else {
+                zlemaData.push(adjustedSrc * k + zlemaData[i - 1] * (1 - k));
+            }
+        }
+
+        const zlema = zlemaData[zlemaData.length - 1];
+
+        // Calculate ATR-based volatility bands
+        const atr = this.calculateAtrFromCloses(closes, length * 3);
+        const volatility = atr * mult;
+
+        const upperBand = zlema + volatility;
+        const lowerBand = zlema - volatility;
+
+        // Determine trend
+        const currentClose = closes[closes.length - 1];
+        let trend = 0;
+
+        if (currentClose > upperBand) {
+            trend = 1; // Bullish
+        } else if (currentClose < lowerBand) {
+            trend = -1; // Bearish
+        }
+
+        return { zlema, upperBand, lowerBand, trend, volatility };
+    }
+
+    // Helper: ATR calculation from closes only
+    calculateAtrFromCloses(closes, period = 14) {
+        if (!closes || closes.length < period + 1) return 0;
+
+        const highs = closes.map((c, i) => i > 0 ? Math.max(c, closes[i - 1]) : c);
+        const lows = closes.map((c, i) => i > 0 ? Math.min(c, closes[i - 1]) : c);
+
+        const trValues = [];
+        for (let i = 1; i < closes.length; i++) {
+            const tr = Math.max(
+                highs[i] - lows[i],
+                Math.abs(highs[i] - closes[i - 1]),
+                Math.abs(lows[i] - closes[i - 1])
+            );
+            trValues.push(tr);
+        }
+
+        if (trValues.length < period) return 0;
+        const recentTr = trValues.slice(-period);
+        return recentTr.reduce((a, b) => a + b, 0) / period;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // MTF ZERO LAG TREND CHECK
+    // ═══════════════════════════════════════════════════════════════
+    // Returns true if we should flip the trade based on MTF confirmation
+    // Primary signal from 5m, check other timeframes (15m, 1H, 4H, 1D)
+    // Need 3+ opposite signals to flip, otherwise stay with primary
+    checkMTFConfirmation(primaryTrend, mtfData) {
+        if (!mtfData || mtfData.length < 4) {
+            return { shouldTakeTrade: false, sameDirectionCount: 0, totalCount: 0 };
+        }
+
+        const sameDirectionCount = mtfData.filter(t => t.trend === primaryTrend).length;
+        const totalCount = mtfData.length;
+
+        const shouldTakeTrade = sameDirectionCount >= 3;
+
+        return { shouldTakeTrade, sameDirectionCount, totalCount };
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // V3 REGIME DETECTION
     // ═══════════════════════════════════════════════════════════════════
 

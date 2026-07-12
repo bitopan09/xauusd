@@ -607,6 +607,13 @@ class TradingBot {
                 confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || undefined,
                 tp1ClosePercent: Number(process.env.TP1_CLOSE_PERCENT) || undefined,
                 maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || undefined,
+                scoreMarginMin: Number(process.env.SCORE_MARGIN_MIN) || undefined,
+                buyScoreMargin: Number(process.env.BUY_SCORE_MARGIN) || undefined,
+                emaAlignmentRequired: process.env.EMA_ALIGNMENT_REQUIRED === 'true' || undefined,
+                zlemaRequired: process.env.ZLEMA_REQUIRED === 'true' || undefined,
+                zlemaEntryRequired: process.env.ZLEMA_ENTRY_REQUIRED !== 'false',
+                zlemaLength: Number(process.env.ZLEMA_LENGTH) || undefined,
+                zlemaMult: Number(process.env.ZLEMA_MULT) || undefined,
                 interval: backtestInterval || 360,
             });
             const broker = new BrokerSimulation();

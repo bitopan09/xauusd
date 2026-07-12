@@ -60,6 +60,12 @@ class UnifiedStrategy {
         this.BUY_SCORE_MARGIN = config.buyScoreMargin ?? (Number(process.env.BUY_SCORE_MARGIN) || 2.0);
         this.EMA_ALIGNMENT_REQUIRED = config.emaAlignmentRequired ?? (process.env.EMA_ALIGNMENT_REQUIRED === 'true' || false);
 
+        // V5: Zero-Lag Trend parameters (from AlgoAlpha indicator)
+        this.ZLEMA_LENGTH = config.zlemaLength ?? (Number(process.env.ZLEMA_LENGTH) || 70);
+        this.ZLEMA_MULT = config.zlemaMult ?? (Number(process.env.ZLEMA_MULT) || 1.2);
+        this.ZLEMA_REQUIRED = config.zlemaRequired ?? (process.env.ZLEMA_REQUIRED === 'true' || false);
+        this.ZLEMA_ENTRY_REQUIRED = config.zlemaEntryRequired ?? (process.env.ZLEMA_ENTRY_REQUIRED !== 'false');
+
         // Convenience aliases for external consumers (tradingBot backtest, etc.)
         this.TP1_RR = config.tp1RR ?? null;
         this.TP2_RR = config.tp2RR ?? null;
@@ -231,6 +237,135 @@ class UnifiedStrategy {
         const last = priceData[priceData.length - 1];
         const mid = ((last.high ?? last.price) + (last.low ?? last.price)) / 2;
         return { direction: last.close > mid + atr * multiplier ? 'BULLISH' : last.close < mid - atr * multiplier ? 'BEARISH' : 'NEUTRAL', value: mid };
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // V5 Zero-Lag Trend Signals (ZLEMA) — AlgoAlpha indicator
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * Calculate Zero-Lag EMA — EMA applied to de-lagged source.
+     * zlema = EMA(src + (src - src[lag]), length)
+     * where lag = floor((length - 1) / 2)
+     */
+    calculateZLEMA(closes, length = 70) {
+        if (!closes || closes.length < length + 2) return [];
+        const lag = Math.floor((length - 1) / 2);
+        const deLagSrc = [];
+        for (let i = lag; i < closes.length; i++) {
+            deLagSrc.push(closes[i] + (closes[i] - closes[i - lag]));
+        }
+        return this.calculateEma(deLagSrc, length);
+    }
+
+    /**
+     * Detect ZLEMA trend state from Pine Script logic:
+     *   trend = 1  when crossover(close, zlema + volatility)
+     *   trend = -1 when crossunder(close, zlema - volatility)
+     *   where volatility = highest(ATR(length), length*3) * mult
+     *
+     * Returns object with current trend state and MTF-friendly signal array.
+     */
+    _calculateZLEMATrend(priceData, length = 70, mult = 1.2) {
+        if (!priceData || priceData.length < length + 10) {
+            return { trend: 0, zlema: null, upper: null, lower: null, signal: 'NEUTRAL', zlemaEntry: false };
+        }
+
+        const closes = priceData.map(p => p.close ?? p.price);
+        const zlemaVals = this.calculateZLEMA(closes, length);
+        if (zlemaVals.length === 0) return { trend: 0, zlema: null, upper: null, lower: null, signal: 'NEUTRAL', zlemaEntry: false };
+
+        // Compute ATR array for volatility band
+        const atrPeriod = length;
+        const atrVals = [];
+        for (let i = atrPeriod; i <= priceData.length; i++) {
+            atrVals.push(this.calculateAtr(priceData.slice(0, i), atrPeriod));
+        }
+
+        // Align arrays — zlemaVals and atrVals must have same length
+        const zlemaLen = zlemaVals.length;
+        const atrLen = atrVals.length;
+        // Build aligned close array
+        const alignedCloses = closes.slice(-Math.min(zlemaLen, atrLen));
+
+        // Compute volatility band: highest(ATR, length*3) * mult
+        const volLookback = length * 3;
+        const volatility = [];
+        for (let i = 0; i < atrLen; i++) {
+            const start = Math.max(0, i - volLookback + 1);
+            const slice = atrVals.slice(start, i + 1);
+            const highestAtr = slice.length > 0 ? Math.max(...slice) : 0;
+            volatility.push(highestAtr * mult);
+        }
+
+        // Detect trend state (replicate Pine Script logic)
+        const n = Math.min(zlemaLen, atrLen, alignedCloses.length);
+        const trendArr = new Array(n).fill(0);
+        for (let i = 1; i < n; i++) {
+            const prevTrend = trendArr[i - 1];
+            const currClose = alignedCloses[i];
+            const prevClose = alignedCloses[i - 1];
+            const zlema_i = zlemaVals[zlemaVals.length - n + i];
+            const prevZlema = zlemaVals[zlemaVals.length - n + i - 1];
+            const vol_i = volatility[volatility.length - n + i];
+            const prevVol = volatility[volatility.length - n + i - 1];
+
+            // crossover(close, zlema + volatility): close crossed above band
+            if (prevClose <= prevZlema + prevVol && currClose > zlema_i + vol_i) {
+                trendArr[i] = 1;
+            }
+            // crossunder(close, zlema - volatility): close crossed below band
+            else if (prevClose >= prevZlema - prevVol && currClose < zlema_i - vol_i) {
+                trendArr[i] = -1;
+            } else {
+                trendArr[i] = prevTrend;
+            }
+        }
+
+        const currentTrend = trendArr[trendArr.length - 1] || 0;
+        const prevTrend = trendArr[trendArr.length - 2] || 0;
+        const currZlema = zlemaVals[zlemaVals.length - 1];
+        const prevZlemaVal = zlemaVals[zlemaVals.length - 2];
+        const currClose = alignedCloses[alignedCloses.length - 1];
+        const prevClose = alignedCloses[alignedCloses.length - 2];
+        const vol = volatility[volatility.length - 1];
+
+        // Entry signals (Pine Script logic)
+        // Bullish: crossover(close, zlema) AND trend == 1 AND trend[1] == 1
+        const bullCross = prevClose <= prevZlemaVal && currClose > currZlema;
+        const bullEntry = bullCross && currentTrend === 1 && prevTrend === 1;
+        // Bearish: crossunder(close, zlema) AND trend == -1 AND trend[1] == -1
+        const bearCross = prevClose >= prevZlemaVal && currClose < currZlema;
+        const bearEntry = bearCross && currentTrend === -1 && prevTrend === -1;
+
+        let signal = 'NEUTRAL';
+        if (bullEntry) signal = 'BULLISH';
+        else if (bearEntry) signal = 'BEARISH';
+        else if (currentTrend === 1) signal = 'BULL_TREND';
+        else if (currentTrend === -1) signal = 'BEAR_TREND';
+
+        return {
+            trend: currentTrend,
+            prevTrend,
+            zlema: currZlema,
+            upper: currZlema + vol,
+            lower: currZlema - vol,
+            volatility: vol,
+            signal,
+            zlemaEntry: bullEntry || bearEntry,
+            entryDirection: bullEntry ? 'BULLISH' : bearEntry ? 'BEARISH' : null,
+            bullCross,
+            bearCross,
+        };
+    }
+
+    /** Shorthand to get ZLEMA trend from different timeframes */
+    _getZLEMAMTF(priceData) {
+        return {
+            main: this._calculateZLEMATrend(priceData, 70, 1.2),
+            fast: priceData.length >= 40 ? this._calculateZLEMATrend(priceData, 30, 1.0) : null,
+            slow: priceData.length >= 100 ? this._calculateZLEMATrend(priceData, 100, 1.5) : null,
+        };
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -751,6 +886,9 @@ class UnifiedStrategy {
             volumeProfile = this._computeVolumeProfile(priceData, 20);
         }
 
+        // ── V5: Zero-Lag Trend Signals (ZLEMA) ──────────────────────
+        const zlemaTrend = this._getZLEMAMTF(priceData);
+
         // ── V3: Pullback zone ──────────────────────────────────────
         const pullback = this._getPullbackZone(priceData);
 
@@ -801,6 +939,45 @@ class UnifiedStrategy {
         // Supertrend confirmation
         if (supertrend.direction === 'BULLISH') { bullScore += 1; details.push('Supertrend bull'); }
         if (supertrend.direction === 'BEARISH') { bearScore += 1; details.push('Supertrend bear'); }
+
+        // ── Factor 1b: ZLEMA TREND (weight 0.15 of trend factor) ──
+        const zlemaMain = zlemaTrend.main;
+        const zlemaFast = zlemaTrend.fast;
+
+        if (zlemaMain.trend === 1) {
+            bullScore += 2;
+            details.push('ZLEMA trend bull');
+            if (zlemaMain.zlemaEntry && zlemaMain.entryDirection === 'BULLISH') {
+                bullScore += 2;
+                details.push('ZLEMA bull entry signal');
+            }
+            if (zlemaFast && zlemaFast.trend === 1) {
+                bullScore += 1;
+                details.push('ZLEMA fast trend bull (MTF confirm)');
+            }
+        }
+        if (zlemaMain.trend === -1) {
+            bearScore += 2;
+            details.push('ZLEMA trend bear');
+            if (zlemaMain.zlemaEntry && zlemaMain.entryDirection === 'BEARISH') {
+                bearScore += 2;
+                details.push('ZLEMA bear entry signal');
+            }
+            if (zlemaFast && zlemaFast.trend === -1) {
+                bearScore += 1;
+                details.push('ZLEMA fast trend bear (MTF confirm)');
+            }
+        }
+
+        // ZLEMA vs Supertrend alignment bonus
+        if (zlemaMain.trend === 1 && supertrend.direction === 'BULLISH') {
+            bullScore += 1;
+            details.push('ZLEMA+Supertrend bull alignment');
+        }
+        if (zlemaMain.trend === -1 && supertrend.direction === 'BEARISH') {
+            bearScore += 1;
+            details.push('ZLEMA+Supertrend bear alignment');
+        }
 
         // ── Factor 2: PULLBACK QUALITY (weight 0.30) ──────────────
         // V3: Prefer entries at Fib levels aligned with trend
@@ -909,10 +1086,8 @@ class UnifiedStrategy {
         // V3 FINAL SCORE — weighted sum (0-10 scale)
         // ═══════════════════════════════════════════════════════════
         // V4 max raw: trend=4, pullback=3, momentum=5, structure=4 = 16
-        // V4-Plus adds VOF structure bonuses (PivotBOS +1, CHoCH +2, POC +1, Manip +1)
-        // but these rarely fire, so MAX_RAW stays at 16 to preserve baseline scoring.
-        // When VOF fires, it pushes score above the baseline ceiling.
-        const MAX_RAW = 16;
+        // V5 adds ZLEMA trend (up to 5 bonus: 2 trend, 2 entry, 1 MTF) = 21
+        const MAX_RAW = 20;
         const normalizedBull = (bullScore / MAX_RAW) * 10;
         const normalizedBear = (bearScore / MAX_RAW) * 10;
         const score = Math.max(normalizedBull, normalizedBear);
@@ -934,6 +1109,8 @@ class UnifiedStrategy {
             pivotBreak,
             manipulation,
             volumeProfile,
+            // V5: ZLEMA trend signals
+            zlemaTrend,
             indicators: {
                 rsi, macd, cpr, liquidity, ote, obfvg, structure,
                 ema50Val, ema200Val, supertrend, stochastic, rsiDivergence, dailyGate,
@@ -1063,18 +1240,16 @@ class UnifiedStrategy {
                 }
             }
 
-            // Change 7: Volatile regime filter — BUY in volatile has poor WR (33%)
-            // SELL in volatile is profitable (68% WR). Keep the BUY block.
-            if (regime?.regime === 'volatile' && signal === 'BUY') {
-                signal = 'NEUTRAL';
-                filterBreakdown.rejectedReason = 'BUY blocked in volatile regime (33% WR historically)';
-            }
+            // Change 7: Volatile regime filter — intentionally DISABLED.
+            // The original code blocked BUY in volatile markets (33% WR), but this
+            // creates a structural bearish bias. Both directions are now allowed.
 
-            // Change 8: RSI quality filter — BUY needs RSI > 55 ("bull" not "weak bull")
+            // Change 8: RSI quality filter — relaxed for better BUY signal generation
+            // Original: blocked if RSI <= 55. Now: only block if RSI < 40 (oversold).
             // Weak RSI buys in bearish market have 22% WR (vs 50% for RSI > 55)
-            if (signal === 'BUY' && confluence.indicators && confluence.indicators.rsi <= 55) {
+            if (signal === 'BUY' && confluence.indicators && confluence.indicators.rsi < 40) {
                 signal = 'NEUTRAL';
-                filterBreakdown.rejectedReason = `BUY blocked — RSI weak (${confluence.indicators.rsi.toFixed(1)}, need > 55)`;
+                filterBreakdown.rejectedReason = `BUY blocked — RSI too low for entry (${confluence.indicators.rsi.toFixed(1)}, need >= 40)`;
             }
 
             // Change 9: BUY EMA crossover — configurable: optional score penalty or hard block
@@ -1085,17 +1260,18 @@ class UnifiedStrategy {
                     signal = 'NEUTRAL';
                     filterBreakdown.rejectedReason = `BUY blocked — EMA 9/21 alignment required (EMA9 ${ema9Val > ema21Val ? '>' : '<'} EMA21)`;
                 } else {
-                    // Penalize: require score >= threshold + 1.0 extra if EMA not aligned
-                    if (score < effectiveThreshold + 1.0) {
+                    // Penalize: require score >= threshold + 0.5 extra if EMA not aligned (relaxed from +1.0)
+                    if (score < effectiveThreshold + 0.5) {
                         signal = 'NEUTRAL';
-                        filterBreakdown.rejectedReason = `BUY blocked — EMA 9/21 weak (EMA9 ${ema9Val > ema21Val ? '>' : '<'} EMA21, score ${score.toFixed(1)} < ${(effectiveThreshold + 1.0).toFixed(1)})`;
+                        filterBreakdown.rejectedReason = `BUY blocked — EMA 9/21 weak (EMA9 ${ema9Val > ema21Val ? '>' : '<'} EMA21, score ${score.toFixed(1)} < ${(effectiveThreshold + 0.5).toFixed(1)})`;
                     }
                 }
             }
 
             // Change 4: Score margin quality gate — require directional confidence (tunable)
+            // Relaxed: both directions use same margin threshold
             let minMargin = this.SCORE_MARGIN_MIN;
-            if (signal === 'BUY') minMargin = this.BUY_SCORE_MARGIN;
+            // Relaxed: both directions use same margin (was 2.0 for BUY, 1.0 for SELL)
             if (signal !== 'NEUTRAL' && confluence.scoreMargin < minMargin) {
                 signal = 'NEUTRAL';
                 filterBreakdown.rejectedReason = `Insufficient directional confidence (margin: ${confluence.scoreMargin.toFixed(1)}, need >= ${minMargin.toFixed(1)})`;
@@ -1123,6 +1299,34 @@ class UnifiedStrategy {
                 } else if (signal === 'SELL' && manip.direction === 'bullish') {
                     filterBreakdown.rejectedReason = 'Manipulation sweep opposes SELL (bullish sweep detected)';
                     signal = 'NEUTRAL';
+                }
+            }
+        }
+
+        // ── V5: ZLEMA Trend Filter (configurable gate) ────────────
+        // ZLEMA_REQUIRED: hard block — trade must align with ZLEMA trend
+        // ZLEMA_ENTRY_REQUIRED: hard block — must have ZLEMA entry signal
+        if (signal !== 'NEUTRAL' && confluence.zlemaTrend) {
+            const zlemaMain = confluence.zlemaTrend.main;
+            if (this.ZLEMA_REQUIRED) {
+                if (signal === 'BUY' && zlemaMain.trend !== 1) {
+                    signal = 'NEUTRAL';
+                    filterBreakdown.rejectedReason = `ZLEMA trend required for BUY (trend: ${zlemaMain.trend})`;
+                } else if (signal === 'SELL' && zlemaMain.trend !== -1) {
+                    signal = 'NEUTRAL';
+                    filterBreakdown.rejectedReason = `ZLEMA trend required for SELL (trend: ${zlemaMain.trend})`;
+                }
+            }
+            if (signal !== 'NEUTRAL' && this.ZLEMA_ENTRY_REQUIRED) {
+                if (!zlemaMain.zlemaEntry) {
+                    signal = 'NEUTRAL';
+                    filterBreakdown.rejectedReason = `ZLEMA entry signal required (signal: ${zlemaMain.signal})`;
+                } else if (signal === 'BUY' && zlemaMain.entryDirection !== 'BULLISH') {
+                    signal = 'NEUTRAL';
+                    filterBreakdown.rejectedReason = `ZLEMA entry direction mismatch (need BULLISH, got ${zlemaMain.entryDirection})`;
+                } else if (signal === 'SELL' && zlemaMain.entryDirection !== 'BEARISH') {
+                    signal = 'NEUTRAL';
+                    filterBreakdown.rejectedReason = `ZLEMA entry direction mismatch (need BEARISH, got ${zlemaMain.entryDirection})`;
                 }
             }
         }

@@ -196,7 +196,10 @@ class DataManager {
 
         if (allCandles.length === 0) return null;
 
-        return allCandles.reverse().map(k => ({
+        // Sort by timestamp ascending (oldest first) for chronological order
+        allCandles.sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
+
+        return allCandles.map(k => ({
             timestamp: new Date(parseInt(k[0])),
             open: parseFloat(k[1]),
             high: parseFloat(k[2]),
