@@ -698,23 +698,9 @@ app.post('/api/full-backtest', async (req, res) => {
         console.log(`Running FULL V4-Plus backtest for ${backtestDays} days with DD risk management...`);
         console.log(`Client candles received: ${candles ? candles.length : 'none'}`);
 
-        // Set strategy parameters
-                    process.env.CONFLUENCE_THRESHOLD = '5.5';
-                    process.env.MAX_SL_DISTANCE = '15';
-                    process.env.TP1_CLOSE_PERCENT = '50';
-
-        // Clear module cache to pick up env changes
-        Object.keys(require.cache).forEach(key => {
-            if (key.includes('unifiedStrategy') || key.includes('tradingBot') || key.includes('brokerSimulation')) {
-                delete require.cache[key];
-            }
-        });
-
-        const TradingBot = require('./tradingBot');
-        const bot = new TradingBot(db);
-
-        // Run base backtest
-        const baseResult = await bot.runBacktest(backtestDays, strategy || 'default', candles || null);
+        // Reuse the live tradingBot instance (already has optimizer config loaded)
+        // This avoids require() cache issues and ephemeral DB config loss on Railway
+        const baseResult = await tradingBot.runBacktest(backtestDays, strategy || 'default', candles || null);
         const rawTrades = baseResult.trades || [];
 
         // ── Progressive Position Sizing (80/60/35) ──
