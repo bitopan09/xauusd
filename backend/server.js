@@ -698,21 +698,87 @@ app.post('/api/full-backtest', async (req, res) => {
         console.log(`Running FULL V4-Plus backtest for ${backtestDays} days...`);
         console.log(`Client candles received: ${candles ? candles.length : 'none'}`);
 
-        // Reuse the live tradingBot instance (already has optimizer config loaded)
         const baseResult = await tradingBot.runBacktest(backtestDays, strategy || 'default', candles || null);
 
-        // Compute summary fields expected by the frontend
+        // Compute all summary fields expected by the frontend
         const STARTING_BALANCE = 50;
         const finalEquity = baseResult.equityCurve?.length
             ? baseResult.equityCurve[baseResult.equityCurve.length - 1].equity
             : STARTING_BALANCE;
         const totalPnl = finalEquity - STARTING_BALANCE;
 
+        // Win/loss counts
+        const trades = baseResult.trades || [];
+        const wins = trades.filter(t => t.pnl > 0);
+        const losses = trades.filter(t => t.pnl <= 0);
+        const winCount = wins.length;
+        const lossCount = losses.length;
+        const totalTrades = trades.length;
+        const winRate = totalTrades > 0 ? winCount / totalTrades : 0;
+
+        // Averages
+        const avgWin = winCount > 0 ? wins.reduce((s, t) => s + t.pnl, 0) / winCount : 0;
+        const avgLoss = lossCount > 0 ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / lossCount) : 0;
+        const winLossRatio = avgLoss > 0 ? avgWin / avgLoss : 0;
+
+        // Max drawdown percentage
+        const maxDrawdownPct = baseResult.maxDrawdown ? (baseResult.maxDrawdown * 100) : 0;
+
+        // Consecutive streaks
+        let maxConsecWin = 0, maxConsecLoss = 0, curWin = 0, curLoss = 0;
+        trades.forEach(t => {
+            if (t.pnl > 0) { curWin++; curLoss = 0; maxConsecWin = Math.max(maxConsecWin, curWin); }
+            else { curLoss++; curWin = 0; maxConsecLoss = Math.max(maxConsecLoss, curLoss); }
+        });
+
+        // Exit reason breakdown
+        const exitReasons = {};
+        trades.forEach(t => {
+            const r = t.exitReason || 'Unknown';
+            if (!exitReasons[r]) exitReasons[r] = { count: 0, pnl: 0 };
+            exitReasons[r].count++;
+            exitReasons[r].pnl += t.pnl;
+        });
+
+        // Regime breakdown
+        const regimeStats = {};
+        trades.forEach(t => {
+            const r = t.regime || 'unknown';
+            if (!regimeStats[r]) regimeStats[r] = { count: 0, wins: 0, pnl: 0 };
+            regimeStats[r].count++;
+            if (t.pnl > 0) regimeStats[r].wins++;
+            regimeStats[r].pnl += t.pnl;
+        });
+
+        // Action breakdown
+        const actionStats = {};
+        trades.forEach(t => {
+            const a = t.action || 'unknown';
+            if (!actionStats[a]) actionStats[a] = { count: 0, wins: 0, pnl: 0 };
+            actionStats[a].count++;
+            if (t.pnl > 0) actionStats[a].wins++;
+            actionStats[a].pnl += t.pnl;
+        });
+
         res.json({
             ...baseResult,
             startingBalance: STARTING_BALANCE,
             finalBalance: Number(finalEquity.toFixed(2)),
             totalPnl: Number(totalPnl.toFixed(2)),
+            winCount,
+            lossCount,
+            avgWin: Number(avgWin.toFixed(2)),
+            avgLoss: Number(avgLoss.toFixed(2)),
+            winLossRatio: Number(winLossRatio.toFixed(2)),
+            maxDrawdownPct: Number(maxDrawdownPct.toFixed(2)),
+            maxConsecWins: maxConsecWin,
+            maxConsecLosses: maxConsecLoss,
+            tradesPerDay: Number((totalTrades / backtestDays).toFixed(2)),
+            winRate: Number(winRate.toFixed(4)),
+            totalTrades,
+            exitReasons,
+            regimeStats,
+            actionStats,
             config: {
                 confluenceThreshold: 5.5,
                 maxSlDistance: 15,
