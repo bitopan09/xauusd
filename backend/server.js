@@ -695,143 +695,21 @@ app.post('/api/full-backtest', async (req, res) => {
     try {
         const { days, strategy, userId, candles } = req.body;
         const backtestDays = days || 90;
-        console.log(`Running FULL V4-Plus backtest for ${backtestDays} days with DD risk management...`);
+        console.log(`Running FULL V4-Plus backtest for ${backtestDays} days...`);
         console.log(`Client candles received: ${candles ? candles.length : 'none'}`);
 
         // Reuse the live tradingBot instance (already has optimizer config loaded)
-        // This avoids require() cache issues and ephemeral DB config loss on Railway
         const baseResult = await tradingBot.runBacktest(backtestDays, strategy || 'default', candles || null);
-        const rawTrades = baseResult.trades || [];
 
-        // ── Progressive Position Sizing (80/60/35) ──
-        const CIRCUIT_BREAKER = 15;
-        const STARTING_BALANCE = 50;
-        let equity = STARTING_BALANCE;
-        let peak = STARTING_BALANCE;
-        const trades = [];
-
-        for (const t of rawTrades) {
-            if (equity < CIRCUIT_BREAKER) break;
-
-            const ddPct = (peak - equity) / peak;
-            let sizeMultiplier;
-            if (ddPct < 0.10)      sizeMultiplier = 1.0;
-            else if (ddPct < 0.20) sizeMultiplier = 0.80;
-            else if (ddPct < 0.30) sizeMultiplier = 0.60;
-            else                    sizeMultiplier = 0.35;
-
-            const adjustedPnl = t.pnl * sizeMultiplier;
-            const adjustedTrade = { ...t, pnl: adjustedPnl, sizeMultiplier };
-            trades.push(adjustedTrade);
-
-            equity += adjustedPnl;
-            if (equity > peak) peak = equity;
-        }
-
-        // ── Equity Curve ──
-        equity = STARTING_BALANCE;
-        const equityCurve = [{ day: 0, equity: STARTING_BALANCE }];
-        trades.forEach((t, i) => {
-            equity += t.pnl;
-            equityCurve.push({ day: i + 1, equity: Number(equity.toFixed(2)) });
-        });
-
-        // ── Statistics ──
-        const wins = trades.filter(t => t.pnl > 0);
-        const losses = trades.filter(t => t.pnl <= 0);
-        const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
-        const grossWins = wins.reduce((s, t) => s + t.pnl, 0);
-        const grossLosses = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
-        const pf = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? Infinity : 0;
-        const avgWin = wins.length ? grossWins / wins.length : 0;
-        const avgLoss = losses.length ? grossLosses / losses.length : 0;
-        const winLossRatio = avgLoss > 0 ? avgWin / avgLoss : 0;
-
-        // Max drawdown
-        let maxDD = 0, maxDDPct = 0;
-        peak = STARTING_BALANCE;
-        equityCurve.forEach(pt => {
-            if (pt.equity > peak) peak = pt.equity;
-            const dd = peak - pt.equity;
-            const ddPct = (dd / peak) * 100;
-            if (ddPct > maxDDPct) { maxDD = dd; maxDDPct = ddPct; }
-        });
-
-        // Consecutive streaks
-        let maxConsecWin = 0, maxConsecLoss = 0, curWin = 0, curLoss = 0;
-        trades.forEach(t => {
-            if (t.pnl > 0) { curWin++; curLoss = 0; maxConsecWin = Math.max(maxConsecWin, curWin); }
-            else { curLoss++; curWin = 0; maxConsecLoss = Math.max(maxConsecLoss, curLoss); }
-        });
-
-        // Exit reason breakdown
-        const exitReasons = {};
-        trades.forEach(t => {
-            const r = t.exitReason || 'Unknown';
-            if (!exitReasons[r]) exitReasons[r] = { count: 0, pnl: 0 };
-            exitReasons[r].count++;
-            exitReasons[r].pnl += t.pnl;
-        });
-
-        // Regime breakdown
-        const regimeStats = {};
-        trades.forEach(t => {
-            const r = t.regime || 'unknown';
-            if (!regimeStats[r]) regimeStats[r] = { count: 0, wins: 0, pnl: 0 };
-            regimeStats[r].count++;
-            if (t.pnl > 0) regimeStats[r].wins++;
-            regimeStats[r].pnl += t.pnl;
-        });
-
-        // Action breakdown
-        const actionStats = {};
-        trades.forEach(t => {
-            const a = t.action || 'unknown';
-            if (!actionStats[a]) actionStats[a] = { count: 0, wins: 0, pnl: 0 };
-            actionStats[a].count++;
-            if (t.pnl > 0) actionStats[a].wins++;
-            actionStats[a].pnl += t.pnl;
-        });
-
-        // Sharpe ratio (simplified)
-        const returns = trades.map(t => t.pnl / STARTING_BALANCE);
-        const avgReturn = returns.length ? returns.reduce((s, r) => s + r, 0) / returns.length : 0;
-        const stdReturn = returns.length > 1 ? Math.sqrt(returns.reduce((s, r) => s + (r - avgReturn) ** 2, 0) / (returns.length - 1)) : 0;
-        const sharpeRatio = stdReturn > 0 ? (avgReturn / stdReturn) * Math.sqrt(252) : 0;
-
+        // Pass through the backtest result directly — no extra post-processing
+        // This ensures the backtest matches the walk-forward validation exactly
         res.json({
-            startingBalance: STARTING_BALANCE,
-            finalBalance: Number(equity.toFixed(2)),
-            totalPnl: Number(totalPnl.toFixed(2)),
-            totalReturn: Number((totalPnl / STARTING_BALANCE).toFixed(4)),
-            maxDrawdown: Number(maxDD.toFixed(2)),
-            maxDrawdownPct: Number(maxDDPct.toFixed(2)),
-            profitFactor: pf === Infinity ? 999 : Number(pf.toFixed(2)),
-            winRate: trades.length > 0 ? Number((wins.length / trades.length).toFixed(4)) : 0,
-            winCount: wins.length,
-            lossCount: losses.length,
-            avgWin: Number(avgWin.toFixed(2)),
-            avgLoss: Number(avgLoss.toFixed(2)),
-            winLossRatio: Number(winLossRatio.toFixed(2)),
-            totalTrades: trades.length,
-            maxConsecWins: maxConsecWin,
-            maxConsecLosses: maxConsecLoss,
-            tradesPerDay: Number((trades.length / backtestDays).toFixed(2)),
-            sharpeRatio: Number(sharpeRatio.toFixed(2)),
-            trades,
-            equityCurve,
-            exitReasons,
-            regimeStats,
-            actionStats,
-            costs: baseResult.costs || null,
+            ...baseResult,
             config: {
                 confluenceThreshold: 5.5,
                 maxSlDistance: 15,
                 tp1ClosePercent: 50,
-                circuitBreaker: CIRCUIT_BREAKER,
-                sizingTiers: [1.0, 0.80, 0.60, 0.35]
             },
-            dataInfo: baseResult.dataInfo || null
         });
     } catch (error) {
         console.error('Full backtest error:', error);
