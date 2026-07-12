@@ -701,10 +701,18 @@ app.post('/api/full-backtest', async (req, res) => {
         // Reuse the live tradingBot instance (already has optimizer config loaded)
         const baseResult = await tradingBot.runBacktest(backtestDays, strategy || 'default', candles || null);
 
-        // Pass through the backtest result directly — no extra post-processing
-        // This ensures the backtest matches the walk-forward validation exactly
+        // Compute summary fields expected by the frontend
+        const STARTING_BALANCE = 50;
+        const finalEquity = baseResult.equityCurve?.length
+            ? baseResult.equityCurve[baseResult.equityCurve.length - 1].equity
+            : STARTING_BALANCE;
+        const totalPnl = finalEquity - STARTING_BALANCE;
+
         res.json({
             ...baseResult,
+            startingBalance: STARTING_BALANCE,
+            finalBalance: Number(finalEquity.toFixed(2)),
+            totalPnl: Number(totalPnl.toFixed(2)),
             config: {
                 confluenceThreshold: 5.5,
                 maxSlDistance: 15,
