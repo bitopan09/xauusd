@@ -64,7 +64,7 @@ class UnifiedStrategy {
         this.ZLEMA_LENGTH = config.zlemaLength ?? (Number(process.env.ZLEMA_LENGTH) || 70);
         this.ZLEMA_MULT = config.zlemaMult ?? (Number(process.env.ZLEMA_MULT) || 1.2);
         this.ZLEMA_REQUIRED = config.zlemaRequired ?? (process.env.ZLEMA_REQUIRED === 'true' || false);
-        this.ZLEMA_ENTRY_REQUIRED = config.zlemaEntryRequired ?? (process.env.ZLEMA_ENTRY_REQUIRED !== 'false');
+        this.ZLEMA_ENTRY_REQUIRED = config.zlemaEntryRequired ?? (process.env.ZLEMA_ENTRY_REQUIRED === 'true');
 
         // Convenience aliases for external consumers (tradingBot backtest, etc.)
         this.TP1_RR = config.tp1RR ?? null;
