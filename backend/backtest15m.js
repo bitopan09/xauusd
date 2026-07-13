@@ -21,7 +21,7 @@ async function runBacktest15m() {
 
     console.log('╔══════════════════════════════════════════════════════════╗');
     console.log(`║     V4-PLUS (VOF) 15m BACKTEST — $${START_EQ} Start               ║`);
-    console.log('║     90 Days | 0.01 Min Lots | Threshold 5.5            ║');
+    console.log('║     90 Days | 0.01 Min Lots | Threshold 6.5            ║');
     console.log('╚══════════════════════════════════════════════════════════╝\n');
 
     // Load 15m cache

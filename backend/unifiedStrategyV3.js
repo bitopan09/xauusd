@@ -18,7 +18,7 @@ class UnifiedStrategy {
         // ═══════════════════════════════════════════════════════════════
         // CORE THRESHOLD
         // ═══════════════════════════════════════════════════════════════
-        this.CONFLUENCE_THRESHOLD = config.confluenceThreshold ?? 5.5;
+        this.CONFLUENCE_THRESHOLD = config.confluenceThreshold ?? (Number(process.env.CONFLUENCE_THRESHOLD) || 6.5);
         this.interval = config.interval || 360;
 
         // ═══════════════════════════════════════════════════════════════
@@ -53,7 +53,7 @@ class UnifiedStrategy {
             volatile:  3.0,
         };
         this.TP1_CLOSE_PERCENT = config.tp1ClosePercent ?? 50; // Default 50% at TP1
-        this.MAX_SL_DISTANCE = config.maxSlDistance ?? Infinity;
+        this.MAX_SL_DISTANCE = config.maxSlDistance ?? (Number(process.env.MAX_SL_DISTANCE) || 8);
 
         // Optimizer-tunable params (via env vars or config object)
         this.SCORE_MARGIN_MIN = config.scoreMarginMin ?? (Number(process.env.SCORE_MARGIN_MIN) || 1.0);
@@ -65,6 +65,10 @@ class UnifiedStrategy {
         this.ZLEMA_MULT = config.zlemaMult ?? (Number(process.env.ZLEMA_MULT) || 1.2);
         this.ZLEMA_REQUIRED = config.zlemaRequired ?? (process.env.ZLEMA_REQUIRED === 'true' || false);
         this.ZLEMA_ENTRY_REQUIRED = config.zlemaEntryRequired ?? (process.env.ZLEMA_ENTRY_REQUIRED === 'true');
+
+        // V6: 5-TF ZLEMA Hard Gate parameters
+        this.ZLEMA_5TF_MIN_COUNT = config.zlema5TFMinCount ?? (Number(process.env.ZLEMA_5TF_MIN_COUNT) || 3);
+        this.ZLEMA_5TF_ENABLED = config.zlema5TFEnabled ?? (process.env.ZLEMA_5TF_ENABLED === 'true' || false);
 
         // Convenience aliases for external consumers (tradingBot backtest, etc.)
         this.TP1_RR = config.tp1RR ?? null;
@@ -366,6 +370,133 @@ class UnifiedStrategy {
             fast: priceData.length >= 40 ? this._calculateZLEMATrend(priceData, 30, 1.0) : null,
             slow: priceData.length >= 100 ? this._calculateZLEMATrend(priceData, 100, 1.5) : null,
         };
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // V6: 5-TIME FRAME ZLEMA HARD GATE
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * Calculate ZLEMA trend state for a single timeframe.
+     * Simplified and robust: bullish if price > ZLEMA, bearish if price < ZLEMA.
+     */
+    _getZLEMATrendState(priceData, length = 14, mult = 1.2) {
+        if (!priceData || priceData.length < length + 5) {
+            return { trend: 0, signal: 'NEUTRAL', zlemaEntry: false, entryDirection: null };
+        }
+        const closes = priceData.map(p => p.close ?? p.price);
+        const zlemaVals = this.calculateZLEMA(closes, length);
+        if (!zlemaVals || zlemaVals.length === 0) {
+            return { trend: 0, signal: 'NEUTRAL', zlemaEntry: false, entryDirection: null };
+        }
+        const currentPrice = closes[closes.length - 1];
+        const currentZlema = zlemaVals[zlemaVals.length - 1];
+        const trend = currentPrice > currentZlema ? 1 : currentPrice < currentZlema ? -1 : 0;
+        return {
+            trend,
+            signal: trend === 1 ? 'BULL_TREND' : trend === -1 ? 'BEAR_TREND' : 'NEUTRAL',
+            zlemaEntry: false,
+            entryDirection: null,
+        };
+    }
+
+    /**
+     * 5-Timeframe ZLEMA hard gate.
+     *
+     * Calculates ZLEMA trend for 5 timeframes: 5m, 15m, 60m, 240m, 1d
+     * Returns: { bullishCount, bearishCount, neutralCount, gatePassed, direction }
+     *   - gatePassed: true if >=3 TFs agree
+     *   - direction: 'BULLISH' if >=3 bullish, 'BEARISH' if >=3 bearish, 'NEUTRAL' otherwise
+     */
+    calculateZLEMA5TF(mtfData) {
+        if (!mtfData || typeof mtfData !== 'object') {
+            return { bullishCount: 0, bearishCount: 0, neutralCount: 0, gatePassed: true, direction: 'NEUTRAL', tfStates: {} };
+        }
+
+        const timeframes = ['5m', '15m', '60m', '240m', '1d'];
+        const tfMap = { '5m': '5m', '15m': '15m', '60m': '60m', '240m': '240m', '1d': '1d' };
+        let bullishCount = 0;
+        let bearishCount = 0;
+        let neutralCount = 0;
+        let availableCount = 0;
+        const tfStates = {};
+
+        for (const tf of timeframes) {
+            const data = mtfData[tfMap[tf]];
+            if (data && data.length >= 20) {
+                // Use shorter length for lower timeframes to adapt to noise
+                const length = tf === '5m' ? 20 : tf === '15m' ? 18 : tf === '60m' ? 16 : tf === '240m' ? 15 : 14;
+                const state = this._getZLEMATrendState(data, length, 1.2);
+                tfStates[tf] = state;
+                availableCount++;
+                if (state.trend === 1) bullishCount++;
+                else if (state.trend === -1) bearishCount++;
+                else neutralCount++;
+            } else {
+                tfStates[tf] = { trend: 0, signal: 'NEUTRAL', zlemaEntry: false, entryDirection: null, insufficientData: true };
+            }
+        }
+
+        const minCount = this.ZLEMA_5TF_MIN_COUNT || 3;
+        // If fewer than minCount TFs are available, pass the gate (don't block)
+        // This allows backtests with limited MTF historical data to still trade
+        if (availableCount < minCount) {
+            return { bullishCount, bearishCount, neutralCount, availableCount, gatePassed: true, direction: 'NEUTRAL', tfStates };
+        }
+        const gatePassed = bullishCount >= minCount || bearishCount >= minCount;
+        const direction = bullishCount >= minCount ? 'BULLISH' : bearishCount >= minCount ? 'BEARISH' : 'NEUTRAL';
+
+        return {
+            bullishCount,
+            bearishCount,
+            neutralCount,
+            availableCount,
+            gatePassed,
+            direction,
+            tfStates,
+        };
+    }
+
+    /**
+     * Apply 5-TF ZLEMA hard gate to an existing signal.
+     * If the gate is not passed, the signal is downgraded to NEUTRAL.
+     */
+    applyZLEMA5TFGate(signal, mftData, filterBreakdown = {}) {
+        if (!this.ZLEMA_5TF_ENABLED) {
+            return { signal, gate: null, filterBreakdown };
+        }
+
+        const gate = this.calculateZLEMA5TF(mftData);
+        const minCount = this.ZLEMA_5TF_MIN_COUNT || 3;
+
+        // If insufficient MTF data, pass the gate (don't block)
+        if (!gate.gatePassed) {
+            filterBreakdown.zlema5TFGate = `Gate blocked — no clear consensus (${gate.bullishCount} bull, ${gate.bearishCount} bear, need >=${minCount})`;
+            return { signal: 'NEUTRAL', gate, filterBreakdown };
+        }
+
+        // If insufficient data was available, pass the gate without direction check
+        if (gate.availableCount < minCount) {
+            filterBreakdown.zlema5TFGate = `Insufficient MTF data — gate passed (${gate.availableCount}/5 TFs available)`;
+            return { signal, gate, filterBreakdown };
+        }
+
+        if (signal === 'BUY' && gate.direction !== 'BULLISH') {
+            filterBreakdown.zlema5TFGate = `BUY blocked: ${gate.bullishCount}/${gate.availableCount || 5} TFs bullish (need >=${minCount})`;
+            return { signal: 'NEUTRAL', gate, filterBreakdown };
+        }
+        if (signal === 'SELL' && gate.direction !== 'BEARISH') {
+            filterBreakdown.zlema5TFGate = `SELL blocked: ${gate.bearishCount}/${gate.availableCount || 5} TFs bearish (need >=${minCount})`;
+            return { signal: 'NEUTRAL', gate, filterBreakdown };
+        }
+
+        filterBreakdown.zlema5TFGate = gate.direction === 'BULLISH'
+            ? `BUY passed: ${gate.bullishCount}/${gate.availableCount || 5} TFs bullish`
+            : gate.direction === 'BEARISH'
+                ? `SELL passed: ${gate.bearishCount}/${gate.availableCount || 5} TFs bearish`
+                : `Insufficient MTF data — gate passed (${gate.availableCount || 0}/5 TFs available)`;
+
+        return { signal, gate, filterBreakdown };
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1123,10 +1254,13 @@ class UnifiedStrategy {
     // V3 SIGNAL GENERATION — strict confluence only
     // ═══════════════════════════════════════════════════════════════════
 
-    analyze(priceData) {
+    analyze(priceData, mtfData = null) {
         if (!priceData || priceData.length < 50) {
             return { signal: 'NEUTRAL', score: 0, details: 'Insufficient data' };
         }
+
+        // TEMP DEBUG
+        const _origSignal = { signal: null, score: null };
 
         const confluence = this.calculateConfluenceScore(priceData);
         const { score, indicators, direction, regime, pullback } = confluence;
@@ -1216,6 +1350,23 @@ class UnifiedStrategy {
                     } else {
                         filterBreakdown.rejectedReason = `Bear direction but EMA not aligned (EMA9 ${bullishEma ? '>' : '<'} EMA21, price ${bullishPrice ? '>' : '<'} EMA50)`;
                     }
+                }
+            }
+
+            // ── Daily Gate Hard Filter ─────────────────────────────
+            // Block counter-daily-trend trades: if daily EMA200 shows bearish,
+            // only allow SELL signals. If bullish, only allow BUY signals.
+            // This prevents taking trend-following signals against the
+            // higher timeframe direction.
+            if (signal !== 'NEUTRAL') {
+                if (!aboveEMA200 && signal === 'BUY') {
+                    signal = 'NEUTRAL';
+                    filterBreakdown.rejectedReason = `Daily gate blocked BUY (price ${currentPrice.toFixed(0)} < daily EMA200 ${dailyGate.ema200.toFixed(0)}, bearish trend)`;
+                    filterBreakdown.dailyGatePass = false;
+                } else if (aboveEMA200 && signal === 'SELL') {
+                    signal = 'NEUTRAL';
+                    filterBreakdown.rejectedReason = `Daily gate blocked SELL (price ${currentPrice.toFixed(0)} > daily EMA200 ${dailyGate.ema200.toFixed(0)}, bullish trend)`;
+                    filterBreakdown.dailyGatePass = false;
                 }
             }
 
@@ -1336,6 +1487,20 @@ class UnifiedStrategy {
         // ═══════════════════════════════════════════════════════════
         const riskParams = this.calculateRiskParameters(priceData, indicators, regime, confluence.goldMeta);
 
+        // ═══════════════════════════════════════════════════════════
+        // V6: 5-TF ZLEMA HARD GATE
+        // ═══════════════════════════════════════════════════════════
+        // If MTF data is provided, apply the hard gate
+        let zlema5TFGate = null;
+        if (mtfData && (signal === 'BUY' || signal === 'SELL')) {
+            const gateResult = this.applyZLEMA5TFGate(signal, mtfData, filterBreakdown);
+            if (gateResult.signal === 'NEUTRAL') {
+                signal = 'NEUTRAL';
+            }
+            zlema5TFGate = gateResult.gate;
+            filterBreakdown = gateResult.filterBreakdown;
+        }
+
         return {
             signal,
             score: confluence.score,
@@ -1346,6 +1511,7 @@ class UnifiedStrategy {
                 goldMeta: confluence.goldMeta || null,
                 regime: regime || null,
                 pullback: pullback || null,
+                zlema5TFGate,
                 timestamp: new Date().toISOString(),
             },
         };
@@ -1606,7 +1772,7 @@ class UnifiedStrategy {
      * @param {object} [options={}]   - { sessionStart, pendingExpiryHrs, orbCandles }
      * @returns {{ signal: string, score: number, details: object }}
      */
-    analyzeMTF(priceData6h, priceData15m, options = {}) {
+    analyzeMTF(priceData6h, priceData15m, options = {}, mtfData = null) {
         this._initPendingEntries();
 
         const {
@@ -1615,8 +1781,8 @@ class UnifiedStrategy {
             orbCandles = 2,
         } = options;
 
-        // Step 1: Run V4 on 6H
-        const baseResult = this.analyze(priceData6h);
+        // Step 1: Run V4 on 6H (pass mtfData for 5-TF ZLEMA gate)
+        const baseResult = this.analyze(priceData6h, mtfData);
         const { signal, score, details: baseDetails } = baseResult;
 
         if (!priceData15m || priceData15m.length < orbCandles + 1 || !this.goldSpecialist) {

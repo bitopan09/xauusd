@@ -147,7 +147,7 @@ const Backtester = () => {
             </div>
 
             <div className="backtester-fixed-lot-banner">
-                <strong>Config:</strong> Threshold 5.5 | MaxSL 15pt | TP1 50% | Circuit Breaker $15 | Sizing: 1.0/0.8/0.6/0.35
+                <strong>Config:</strong> Threshold 6.5 | MaxSL 8pt | TP1 50% | Window 100 | 24h Session | Sizing: 1.0/0.8/0.6/0.35
             </div>
 
             <div className="backtester-settings-grid compact-backtest-settings">
@@ -450,6 +450,7 @@ const Backtester = () => {
                                         <th>SL</th>
                                         <th>Exit SL</th>
                                         <th>Regime</th>
+                                        <th>ZLEMA 5-TF</th>
                                         <th>PnL</th>
                                         <th>Mult</th>
                                         <th>Reason</th>
@@ -466,6 +467,15 @@ const Backtester = () => {
                                             <td style={{ color: '#f87171', fontSize: '0.82rem' }}>${trade.sl?.toFixed(2) || '—'}</td>
                                             <td style={{ color: '#94a3b8', fontSize: '0.78rem' }}>${trade.exitSl?.toFixed(2) || '—'}</td>
                                             <td style={{ fontSize: '0.7rem', color: '#94a3b8' }}>{trade.regime || '—'}</td>
+                                            <td style={{ fontSize: '0.7rem', color: '#94a3b8' }}>
+                                                {trade.zlema5TFGate ? (
+                                                    <span title={trade.zlema5TFGate.tfStates?.map(s => `${s.tf}: ${s.state}`).join('\n')}>
+                                                        {trade.zlema5TFGate.direction === 'BULLISH' ? '🐂' : trade.zlema5TFGate.direction === 'BEARISH' ? '🐻' : '—'}
+                                                        {' '}
+                                                        {trade.zlema5TFGate.bullishCount}/{trade.zlema5TFGate.bearishCount}/{trade.zlema5TFGate.neutralCount}
+                                                    </span>
+                                                ) : '—'}
+                                            </td>
                                             <td className={trade.pnl >= 0 ? 'profit' : 'loss'}>
                                                 ${trade.pnl?.toFixed(2)}
                                             </td>

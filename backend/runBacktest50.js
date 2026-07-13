@@ -7,7 +7,17 @@ async function run() {
     process.env.MAX_SL_DISTANCE = '15';
     process.env.TP1_CLOSE_PERCENT = '50';
 
-    const cacheFile = path.join(__dirname, 'xau_backtest_cache_2026-06-28_360.json');
+    // Find the most recent cache file for 6H (360m) data
+    const cacheDir = __dirname;
+    const cacheFiles = fs.readdirSync(cacheDir)
+        .filter(f => f.startsWith('xau_backtest_cache_') && f.includes('_360.json'))
+        .sort()
+        .reverse();
+    if (cacheFiles.length === 0) {
+        throw new Error('No 6H cache files found in ' + cacheDir);
+    }
+    const cacheFile = path.join(__dirname, cacheFiles[0]);
+    console.log(`Using cache file: ${cacheFiles[0]}`);
     const allCandles = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     
     const halfIdx = Math.floor(allCandles.length / 2);

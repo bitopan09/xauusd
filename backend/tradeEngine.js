@@ -38,17 +38,17 @@ class TradeEngine {
         this.broker = broker;
 
         // ── Session hours (unified) ────────────────────────────────
-        this.SESSION_START_MIN = config.sessionStartMin ?? 6 * 60;  // 06:00 UTC
-        this.SESSION_END_MIN   = config.sessionEndMin   ?? 20 * 60; // 20:00 UTC
+        this.SESSION_START_MIN = config.sessionStartMin ?? 0;    // 00:00 UTC (24h trading)
+        this.SESSION_END_MIN   = config.sessionEndMin   ?? 23 * 60 + 59; // 23:59 UTC
 
         // ── Dynamic confluence threshold (equity-based) ─────────────
-        // Backtest uses equity-based tiers; live uses fixed threshold.
-        // We unify to equity-based tiers (more conservative).
+        // Relaxed: allow more signals to pass for $50 starting capital
         this.EQUITY_THRESHOLDS = config.equityThresholds ?? [
-            { minEquity: 60, minScore: 0 },
-            { minEquity: 40, minScore: 6.0 },
-            { minEquity: 25, minScore: 6.5 },
-            { minEquity: 0,  minScore: 7.0 },
+            { minEquity: 100, minScore: 0 },   // Above $100: no threshold
+            { minEquity: 50,  minScore: 4.0 }, // $50-100: threshold 4.0
+            { minEquity: 30,  minScore: 4.5 }, // $30-50: threshold 4.5
+            { minEquity: 15,  minScore: 5.0 }, // $15-30: threshold 5.0
+            { minEquity: 0,   minScore: 5.5 },  // Below $15: threshold 5.5
         ];
 
         // ── Dynamic risk % (equity-based tiers) ────────────────────
@@ -107,6 +107,7 @@ class TradeEngine {
         dailyLossCount,
         sub15mData = null,
         useMTF = false,
+        mtfData = null,
     }) {
         // 1. Equity floor — skip if equity too low
         if (equity < this.EQUITY_FLOOR) {
@@ -139,12 +140,13 @@ class TradeEngine {
         }
 
         // 6. Run analysis (MTF if available, else single-TF)
+        // Pass mtfData for 5-TF ZLEMA hard gate if available
         const analysis = useMTF && sub15mData && sub15mData.length >= 4
             ? this.strategy.analyzeMTF(currentWindow, sub15mData, {
                 sessionStart: currentCandle.timestamp,
                 orbCandles: 2,
-              })
-            : this.strategy.analyze(currentWindow);
+              }, mtfData)
+            : this.strategy.analyze(currentWindow, mtfData);
 
         // 7. Skip pending MTF signals
         if (analysis.signal === 'PENDING_BUY' || analysis.signal === 'PENDING_SELL') {
@@ -233,6 +235,8 @@ class TradeEngine {
                 regime: analysis.details?.regime?.regime || 'unknown',
                 timestamp: currentCandle.timestamp,
                 status: 'OPEN',
+                filterBreakdown: analysis.details?.filterBreakdown || null,
+                zlema5TFGate: analysis.details?.zlema5TFGate || null,
             },
             costs: {
                 spread: entryFillResult.spread,

@@ -9,8 +9,8 @@ class AnalysisEngine {
     constructor(config = {}) {
         const strategyConfig = {
             tp1ClosePercent: config.tp1ClosePercent ?? (Number(process.env.TP1_CLOSE_PERCENT) || 50),
-            maxSlDistance: config.maxSlDistance ?? (Number(process.env.MAX_SL_DISTANCE) || 15),
-            confluenceThreshold: config.confluenceThreshold ?? (Number(process.env.CONFLUENCE_THRESHOLD) || 5.5),
+            maxSlDistance: config.maxSlDistance ?? (Number(process.env.MAX_SL_DISTANCE) || 8),
+            confluenceThreshold: config.confluenceThreshold ?? (Number(process.env.CONFLUENCE_THRESHOLD) || 6.5),
             tp1RR: config.tp1RR ?? (Number(process.env.TP1_RR) || undefined),
             tp2RR: config.tp2RR ?? (Number(process.env.TP2_RR) || undefined),
             interval: config.interval ?? 360,
@@ -32,13 +32,13 @@ class AnalysisEngine {
      * @param {Array} priceData - Historical price data (6H candles)
      * @returns {Object} Analysis results with signal and score
      */
-    analyze(priceData) {
+    analyze(priceData, mtfData = null) {
         // Delegate to UnifiedStrategy which enforces its own minimum data check (50 candles)
         if (!priceData || priceData.length < 20) {
             return { signal: 'NEUTRAL', score: 0, details: 'Insufficient data' };
         }
 
-        const result = this.strategy.analyze(priceData);
+        const result = this.strategy.analyze(priceData, mtfData);
 
         // Wrap in the format expected by DecisionEngine and TradingBot
         return {
@@ -65,12 +65,12 @@ class AnalysisEngine {
      * @param {object} [options={}] - { sessionStart, pendingExpiryHrs, orbCandles }
      * @returns {{ signal: string, score: number, details: object }}
      */
-    analyzeMTF(priceData6h, priceData15m, options = {}) {
+    analyzeMTF(priceData6h, priceData15m, options = {}, mtfData = null) {
         if (!priceData6h || priceData6h.length < 20) {
             return { signal: 'NEUTRAL', score: 0, details: 'Insufficient 6H data' };
         }
 
-        const result = this.strategy.analyzeMTF(priceData6h, priceData15m, options);
+        const result = this.strategy.analyzeMTF(priceData6h, priceData15m, options, mtfData);
 
         return {
             signal: result.signal,

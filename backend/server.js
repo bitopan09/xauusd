@@ -617,7 +617,21 @@ app.get('/api/bot/status', async (req, res) => {
             res.json({
                 bot: status,
                 recentTrades: recentTrades,
-                todayTrade: row || null
+                todayTrade: row || null,
+                config: {
+                    confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || 6.5,
+                    maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || 8,
+                    tp1ClosePercent: Number(process.env.TP1_CLOSE_PERCENT) || 50,
+                    scoreMarginMin: Number(process.env.SCORE_MARGIN_MIN) || 0.5,
+                    buyScoreMargin: Number(process.env.BUY_SCORE_MARGIN) || 0.5,
+                    emaAlignmentRequired: process.env.EMA_ALIGNMENT_REQUIRED === 'true',
+                    zlemaRequired: process.env.ZLEMA_REQUIRED === 'true',
+                    zlemaEntryRequired: process.env.ZLEMA_ENTRY_REQUIRED === 'true',
+                    zlema5TFEnabled: process.env.ZLEMA_5TF_ENABLED === 'true',
+                    windowSize: Number(process.env.WINDOW_SIZE) || 100,
+                    sessionStartMin: Number(process.env.SESSION_START_MIN) || 0,
+                    sessionEndMin: Number(process.env.SESSION_END_MIN) || 1439,
+                }
             });
         });
     } catch (error) {
@@ -788,9 +802,9 @@ app.post('/api/full-backtest', async (req, res) => {
             regimeStats,
             actionStats,
             config: {
-                confluenceThreshold: 5.5,
-                maxSlDistance: 15,
-                tp1ClosePercent: 50,
+                confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || 6.5,
+                maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || 8,
+                tp1ClosePercent: Number(process.env.TP1_CLOSE_PERCENT) || 50,
             },
         });
     } catch (error) {
@@ -880,14 +894,14 @@ app.post('/api/optimizer/run', async (req, res) => {
             const origZlemaLength = process.env.ZLEMA_LENGTH;
             const origZlemaMult = process.env.ZLEMA_MULT;
 
-            process.env.CONFLUENCE_THRESHOLD = String(params.confluenceThreshold || 5.5);
-            process.env.MAX_SL_DISTANCE = String(params.maxSlDistance || 15);
-            process.env.TP1_CLOSE_PERCENT = String(params.tp1ClosePercent || 60);
-            process.env.SCORE_MARGIN_MIN = String(params.scoreMarginMin ?? 1.0);
-            process.env.BUY_SCORE_MARGIN = String(params.buyScoreMargin ?? 2.0);
+            process.env.CONFLUENCE_THRESHOLD = String(params.confluenceThreshold || 6.5);
+            process.env.MAX_SL_DISTANCE = String(params.maxSlDistance || 8);
+            process.env.TP1_CLOSE_PERCENT = String(params.tp1ClosePercent || 50);
+            process.env.SCORE_MARGIN_MIN = String(params.scoreMarginMin ?? 0.5);
+            process.env.BUY_SCORE_MARGIN = String(params.buyScoreMargin ?? 0.5);
             process.env.EMA_ALIGNMENT_REQUIRED = String(params.emaAlignmentRequired ?? false);
             process.env.ZLEMA_REQUIRED = String(params.zlemaRequired ?? false);
-            process.env.ZLEMA_ENTRY_REQUIRED = String(params.zlemaEntryRequired ?? true);
+            process.env.ZLEMA_ENTRY_REQUIRED = String(params.zlemaEntryRequired ?? false);
             process.env.ZLEMA_LENGTH = String(params.zlemaLength ?? 70);
             process.env.ZLEMA_MULT = String(params.zlemaMult ?? 1.2);
 
@@ -1128,9 +1142,9 @@ schedule.scheduleJob('0 1 * * *', async () => {
             const origSL = process.env.MAX_SL_DISTANCE;
             const origTP1 = process.env.TP1_CLOSE_PERCENT;
 
-            process.env.CONFLUENCE_THRESHOLD = String(params.confluenceThreshold || 5.5);
-            process.env.MAX_SL_DISTANCE = String(params.maxSlDistance || 15);
-            process.env.TP1_CLOSE_PERCENT = String(params.tp1ClosePercent || 60);
+            process.env.CONFLUENCE_THRESHOLD = String(params.confluenceThreshold || 6.5);
+            process.env.MAX_SL_DISTANCE = String(params.maxSlDistance || 8);
+            process.env.TP1_CLOSE_PERCENT = String(params.tp1ClosePercent || 50);
 
             Object.keys(require.cache).forEach(key => {
                 if (key.includes('unifiedStrategy') || key.includes('tradingBot') || key.includes('brokerSimulation') || key.includes('tradeEngine')) {

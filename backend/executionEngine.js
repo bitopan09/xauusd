@@ -11,8 +11,8 @@ class ExecutionEngine {
         this.MAX_POSITION_LOTS = Number(process.env.MAX_POSITION_LOTS) || 0.1;
         this.strategy = new UnifiedStrategy({
             tp1ClosePercent: config.tp1ClosePercent ?? (Number(process.env.TP1_CLOSE_PERCENT) || 50),
-            maxSlDistance: config.maxSlDistance ?? (Number(process.env.MAX_SL_DISTANCE) || 15),
-            confluenceThreshold: config.confluenceThreshold ?? (Number(process.env.CONFLUENCE_THRESHOLD) || 5.5),
+            maxSlDistance: config.maxSlDistance ?? (Number(process.env.MAX_SL_DISTANCE) || 8),
+            confluenceThreshold: config.confluenceThreshold ?? (Number(process.env.CONFLUENCE_THRESHOLD) || 6.5),
             interval: config.interval ?? 360,
         });
 

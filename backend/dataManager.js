@@ -23,7 +23,9 @@ class DataManager {
     constructor(db) {
         this.db = db;
         this._ready = false;
-        this._ensureTable();
+        if (this.db) {
+            this._ensureTable();
+        }
     }
 
     _ensureTable() {
@@ -52,7 +54,7 @@ class DataManager {
     }
 
     async _waitReady() {
-        if (this._ready) return;
+        if (this._ready || !this.db) return;
         return new Promise(resolve => {
             const check = () => {
                 if (this._ready) resolve();
@@ -135,7 +137,10 @@ class DataManager {
                 if (fs.existsSync(cacheFile)) {
                     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
                     if (cached && cached.length > 0) {
-                        return cached.map(k => ({ ...k, timestamp: new Date(k.timestamp), source: 'cache' }));
+                        const parsed = cached.map(k => ({ ...k, timestamp: new Date(k.timestamp), source: 'cache' }));
+                        // Ensure chronological order (oldest first) — fix for corrupted cache files
+                        parsed.sort((a, b) => a.timestamp - b.timestamp);
+                        return parsed;
                     }
                 }
             }
@@ -171,10 +176,19 @@ class DataManager {
 
     /**
      * Fetch candles from Binance Futures REST API.
+     * Supports multi-timeframe fetching for 5-TF ZLEMA analysis.
      */
     async _fetchBinance(interval, requiredCount, endTimeMs) {
         // Map backtest intervals to Binance interval strings
-        const binanceInterval = { '360': '6h', '6h': '6h', '15': '15m', '15m': '15m', '5': '5m', '5m': '5m', '1': '1m', '1m': '1m' };
+        const binanceInterval = {
+            '360': '6h', '6h': '6h',
+            '240': '4h', '4h': '4h',
+            '60': '1h', '1h': '1h',
+            '15': '15m', '15m': '15m',
+            '5': '5m', '5m': '5m',
+            '1': '1m', '1m': '1m',
+            '1d': '1d', '1440': '1d', 'd': '1d', 'D': '1d'
+        };
         const binInt = binanceInterval[interval] || interval;
         const url = `https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval=${binInt}&limit=200`;
         let end = endTimeMs || Date.now();
@@ -228,7 +242,15 @@ class DataManager {
      */
     async _fetchOKX(interval, requiredCount, endTimeMs) {
         // Map Binance intervals to OKX bar format
-        const okxBarMap = { '6h': '6H', '15m': '15m', '5m': '5m', '1m': '1m', '1h': '1H', '4h': '4H' };
+        const okxBarMap = {
+            '6h': '6H', '360': '6H',
+            '4h': '4H', '240': '4H',
+            '1h': '1H', '60': '1H',
+            '15m': '15m', '15': '15m',
+            '5m': '5m', '5': '5m',
+            '1m': '1m', '1': '1m',
+            '1d': '1D', '1440': '1D', 'd': '1D', 'D': '1D'
+        };
         const okxBar = okxBarMap[interval] || interval;
 
         // OKX only supports up to 300 candles per request
@@ -311,6 +333,26 @@ class DataManager {
             price: parseFloat(k[4]),
             source: 'bybit',
         }));
+    }
+
+    /**
+     * Fetch multiple timeframes for 5-TF ZLEMA analysis.
+     * Returns a map of timeframe -> candle array.
+     */
+    async fetchMultiTimeframes(intervals, requiredCount, endTimeMs) {
+        const results = {};
+        const promises = intervals.map(async (intv) => {
+            try {
+                const data = await this.getHistoricalData(requiredCount, intv, endTimeMs);
+                if (data && data.length > 0) {
+                    results[intv] = data;
+                }
+            } catch (err) {
+                console.warn(`[DataManager] Failed to fetch ${intv}: ${err.message}`);
+            }
+        });
+        await Promise.all(promises);
+        return results;
     }
 
     /**

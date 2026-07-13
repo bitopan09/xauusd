@@ -6,8 +6,8 @@ class DecisionEngine {
         this.db = db;
         this.analysisEngine = new AnalysisEngine({
             tp1ClosePercent: config.tp1ClosePercent ?? (Number(process.env.TP1_CLOSE_PERCENT) || 50),
-            maxSlDistance: config.maxSlDistance ?? (Number(process.env.MAX_SL_DISTANCE) || 15),
-            confluenceThreshold: config.confluenceThreshold ?? (Number(process.env.CONFLUENCE_THRESHOLD) || 5.5),
+            maxSlDistance: config.maxSlDistance ?? (Number(process.env.MAX_SL_DISTANCE) || 8),
+            confluenceThreshold: config.confluenceThreshold ?? (Number(process.env.CONFLUENCE_THRESHOLD) || 6.5),
             interval: config.interval ?? (Number(process.env.BACKTEST_INTERVAL) || 360),
         });
         this.dailyTradeTaken = false;
@@ -48,14 +48,14 @@ class DecisionEngine {
      * @param {Array} priceData15m - 15m candles
      * @returns {Promise<{action: string, reason: string, details: object}>}
      */
-    async makeDecisionMTF(priceData6h, priceData15m) {
-        return this._makeDecisionInternal(priceData6h, priceData15m, true);
+    async makeDecisionMTF(priceData6h, priceData15m, mtfData = null) {
+        return this._makeDecisionInternal(priceData6h, priceData15m, true, mtfData);
     }
 
     /**
      * Internal decision logic (shared between single-TF and MTF).
      */
-    async _makeDecisionInternal(priceData6h, priceData15m = null, useMTF = false) {
+    async _makeDecisionInternal(priceData6h, priceData15m = null, useMTF = false, mtfData = null) {
         // Reset daily stats if new day
         const today = new Date().toDateString();
         if (this.lastTradeDate !== today) {
@@ -70,8 +70,8 @@ class DecisionEngine {
 
         // Always perform technical analysis first
         const analysis = useMTF
-            ? this.analysisEngine.analyzeMTF(priceData6h, priceData15m)
-            : this.analysisEngine.analyze(priceData6h);
+            ? this.analysisEngine.analyzeMTF(priceData6h, priceData15m, {}, mtfData)
+            : this.analysisEngine.analyze(priceData6h, mtfData);
 
         // Check circuit breaker (session + daily limits)
         if (this.dailyLossCount >= this.MAX_DAILY_LOSSES) {

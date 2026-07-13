@@ -18,7 +18,7 @@ class UnifiedStrategy {
         // ═══════════════════════════════════════════════════════════════
         // CORE THRESHOLD
         // ═══════════════════════════════════════════════════════════════
-        this.CONFLUENCE_THRESHOLD = config.confluenceThreshold ?? 5.5;
+        this.CONFLUENCE_THRESHOLD = config.confluenceThreshold ?? (Number(process.env.CONFLUENCE_THRESHOLD) || 6.5);
 
         // ═══════════════════════════════════════════════════════════════
         // V3 CORE FACTOR WEIGHTS (must sum to 1.0)

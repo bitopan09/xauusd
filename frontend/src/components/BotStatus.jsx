@@ -79,8 +79,8 @@ const BotStatus = () => {
                                     <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>EMA21</td><td style={{ textAlign: 'right', color: bot.filterBreakdown.bearishEma ? '#4ade80' : '#f87171' }}>${Number(bot.filterBreakdown.ema21Val).toFixed(2)}</td></tr>
                                     <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>EMA50</td><td style={{ textAlign: 'right' }}>${Number(bot.filterBreakdown.ema50Val).toFixed(2)}</td></tr>
                                     <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Dir</td><td style={{ textAlign: 'right' }}>{bot.filterBreakdown.confluenceDirection}</td></tr>
-                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>EMA9>21</td><td style={{ textAlign: 'right', color: bot.filterBreakdown.bullishEma ? '#4ade80' : '#94a3b8' }}>{bot.filterBreakdown.bullishEma ? 'YES' : 'NO'}</td></tr>
-                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Price>50</td><td style={{ textAlign: 'right', color: bot.filterBreakdown.bullishPrice ? '#4ade80' : '#94a3b8' }}>{bot.filterBreakdown.bullishPrice ? 'YES' : 'NO'}</td></tr>
+                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>EMA9{'>'}21</td><td style={{ textAlign: 'right', color: bot.filterBreakdown.bullishEma ? '#4ade80' : '#94a3b8' }}>{bot.filterBreakdown.bullishEma ? 'YES' : 'NO'}</td></tr>
+                                    <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Price{'>'}50</td><td style={{ textAlign: 'right', color: bot.filterBreakdown.bullishPrice ? '#4ade80' : '#94a3b8' }}>{bot.filterBreakdown.bullishPrice ? 'YES' : 'NO'}</td></tr>
                                 </tbody>
                             </table>
                             {bot.filterBreakdown.rejectedReason && (
@@ -92,6 +92,24 @@ const BotStatus = () => {
                     )}
                 </div>
                 
+                {status.config && (
+                    <div className="today-trade-card">
+                        <h4 style={{ margin: '0 0 8px 0', color: '#e2e8f0' }}>Validated Config (v3.0)</h4>
+                        <table style={{ width: '100%', fontSize: '0.78rem', borderCollapse: 'collapse' }}>
+                            <tbody>
+                                <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Confluence</td><td style={{ textAlign: 'right', color: '#4ade80', fontWeight: 'bold' }}>{status.config.confluenceThreshold}</td></tr>
+                                <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Max SL</td><td style={{ textAlign: 'right' }}>{status.config.maxSlDistance}pt</td></tr>
+                                <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>TP1 Close</td><td style={{ textAlign: 'right' }}>{status.config.tp1ClosePercent}%</td></tr>
+                                <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Score Margin</td><td style={{ textAlign: 'right' }}>{status.config.scoreMarginMin}</td></tr>
+                                <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Window</td><td style={{ textAlign: 'right' }}>{status.config.windowSize}</td></tr>
+                                <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>Session</td><td style={{ textAlign: 'right' }}>{status.config.sessionStartMin === 0 && status.config.sessionEndMin === 1439 ? '24h' : `${Math.floor(status.config.sessionStartMin/60)}:00-${Math.floor(status.config.sessionEndMin/60)}:00`}</td></tr>
+                                <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>EMA Align</td><td style={{ textAlign: 'right', color: status.config.emaAlignmentRequired ? '#fbbf24' : '#94a3b8' }}>{status.config.emaAlignmentRequired ? 'Required' : 'Bonus Only'}</td></tr>
+                                <tr><td style={{ padding: '2px 4px', color: '#94a3b8' }}>ZLEMA 5-TF</td><td style={{ textAlign: 'right', color: status.config.zlema5TFEnabled ? '#fbbf24' : '#94a3b8' }}>{status.config.zlema5TFEnabled ? 'Enabled' : 'Disabled'}</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+
                 <div className="today-trade-card">
                     <h4 style={{ margin: '0 0 8px 0', color: '#e2e8f0' }}>Today's Single Trade</h4>
                     {todayTrade ? (

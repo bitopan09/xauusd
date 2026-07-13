@@ -51,7 +51,7 @@ async function runBacktest30m() {
 
     console.log('╔══════════════════════════════════════════════════════════╗');
     console.log(`║     V4-PLUS (VOF) 30m BACKTEST — $${START_EQ} Start               ║`);
-    console.log('║     90 Days | 0.01 Min Lots | Threshold 5.5            ║');
+    console.log('║     90 Days | 0.01 Min Lots | Threshold 6.5            ║');
     console.log('╚══════════════════════════════════════════════════════════╝\n');
 
     const clientCandles = candles30m.map(k => [

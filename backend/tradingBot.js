@@ -14,14 +14,14 @@ class TradingBot {
             lossesPerSession: Number(process.env.LOSSES_PER_SESSION) || 1,
             maxDailyLosses: Number(process.env.MAX_DAILY_LOSSES) || 2,
             tp1ClosePercent: Number(process.env.TP1_CLOSE_PERCENT) || 50,
-            maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || 15,
-            confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || 5.5,
+            maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || 8,
+            confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || 6.5,
             interval: Number(process.env.BACKTEST_INTERVAL) || 360,
         });
         this.executionEngine = new ExecutionEngine(this.db, {
             tp1ClosePercent: Number(process.env.TP1_CLOSE_PERCENT) || 50,
-            maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || 15,
-            confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || 5.5,
+            maxSlDistance: Number(process.env.MAX_SL_DISTANCE) || 8,
+            confluenceThreshold: Number(process.env.CONFLUENCE_THRESHOLD) || 6.5,
             interval: Number(process.env.BACKTEST_INTERVAL) || 360,
         });
         
@@ -81,6 +81,11 @@ class TradingBot {
         this.blackSwanActive = false;
         this.blackSwanReason = null;
 
+        // ── MTF: Live 5-TF cache for ZLEMA gate ──────────────────────
+        this.mtfDataCache = null;
+        this.mtfDataLastFetch = 0;
+        this.MTF_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
         this._initializePriceData();
         this._loadOptimizerConfig();
     }
@@ -97,6 +102,10 @@ class TradingBot {
      * Overrides env var defaults when an optimizer run has been deployed.
      */
     _loadOptimizerConfig() {
+        if (!this.db) {
+            console.log('[Bot] No DB connection — using env var defaults');
+            return;
+        }
         this.db.get(
             `SELECT value, score, profit_factor, max_dd_pct, win_rate, trades 
              FROM optimizer_config WHERE is_active = 1 
@@ -333,8 +342,16 @@ class TradingBot {
 
             // Perform analysis and make decision (MTF if 15m data available)
             const has15m = this.priceData15m.length >= 50;
+            let liveMtfData = null;
+            if (has15m && process.env.ZLEMA_5TF_ENABLED !== 'false') {
+                try {
+                    liveMtfData = await this._fetchLiveMTFData();
+                } catch (err) {
+                    console.warn('[Live MTF] Failed to fetch MTF data:', err.message);
+                }
+            }
             const decision = has15m
-                ? await this.decisionEngine.makeDecisionMTF(this.priceData, this.priceData15m)
+                ? await this.decisionEngine.makeDecisionMTF(this.priceData, this.priceData15m, liveMtfData)
                 : await this.decisionEngine.makeDecision(this.priceData);
             this.lastAnalysisTime = new Date().toISOString();
 
@@ -463,8 +480,11 @@ class TradingBot {
      * @param {number} days - Lookback period
      * @param {string} strategy - Strategy name
      * @param {Array|null} clientCandles - Raw candle arrays from frontend (bypasses server-side fetch)
+     * @param {string|null} interval - Candle interval
+     * @param {number} startingCapital - Starting capital
+     * @param {number} windowSize - Analysis window size (default 50)
      */
-    async runBacktest(days = 90, strategy = 'default', clientCandles = null, interval = null, startingCapital = 50) {
+    async runBacktest(days = 90, strategy = 'default', clientCandles = null, interval = null, startingCapital = 50, windowSize = 100) {
         const backtestDays = Number.isFinite(Number(days)) && Number(days) > 0 ? Number(days) : 90;
         const backtestInterval = interval || '360';
         const intervalMin = parseInt(backtestInterval);
@@ -503,7 +523,7 @@ class TradingBot {
                 dataSource = 'client_browser';
                 console.log(`✓ Parsed ${historicalData.length} client candles`);
 
-                // Cache client data for subsequent server-side runs
+                // Cache client data for subsequent server-side runs (only if missing or client has more data)
                 try {
                     const files = fs.readdirSync(__dirname).filter(f => f.startsWith('xau_backtest_cache_') && f.endsWith('.json'));
                     files.forEach(f => {
@@ -511,11 +531,23 @@ class TradingBot {
                             try { fs.unlinkSync(path.join(__dirname, f)); } catch (e) {}
                         }
                     });
-                    fs.writeFileSync(cacheFile, JSON.stringify(historicalData.map(d => ({
-                        ...d,
-                        timestamp: d.timestamp.toISOString()
-                    }))));
-                    console.log(`✓ Cached client data to ${cacheFile}`);
+                    // Only overwrite if cache doesn't exist or client data is larger
+                    let existingCount = 0;
+                    if (fs.existsSync(cacheFile)) {
+                        try {
+                            const existing = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+                            existingCount = existing.length;
+                        } catch (e) {}
+                    }
+                    if (historicalData.length > existingCount) {
+                        fs.writeFileSync(cacheFile, JSON.stringify(historicalData.map(d => ({
+                            ...d,
+                            timestamp: d.timestamp.toISOString()
+                        }))));
+                        console.log(`✓ Cached client data to ${cacheFile} (${historicalData.length} candles, was ${existingCount})`);
+                    } else {
+                        console.log(`✓ Keeping existing cache ${cacheFile} (${existingCount} candles >= ${historicalData.length})`);
+                    }
                 } catch (writeErr) {
                     console.warn('Could not write cache file:', writeErr.message);
                 }
@@ -572,6 +604,27 @@ class TradingBot {
             const lastTs = historicalData[historicalData.length - 1].timestamp.toISOString();
             const dataHash = `${firstTs.slice(0,10)}_${lastTs.slice(0,10)}_${historicalData.length}`;
 
+            // ── MTF: Fetch all 5 timeframes for ZLEMA 5-TF analysis ────────
+            let mtfData = {};
+            const tfIntervals = ['5m', '15m', '60m', '240m', '1d'];
+            const tfRequiredCounts = { '5m': 500, '15m': 300, '60m': 200, '240m': 100, '1d': 50 };
+
+            for (const tf of tfIntervals) {
+                try {
+                    const tfData = await this.dataManager.getHistoricalData(
+                        tfRequiredCounts[tf],
+                        tf,
+                        anchoredEnd.getTime()
+                    );
+                    if (tfData && tfData.length > 0) {
+                        mtfData[tf] = tfData;
+                    }
+                } catch (err) {
+                    console.warn(`[Backtest] Failed to fetch ${tf} data: ${err.message}`);
+                }
+            }
+            console.log(`[Backtest] Fetched MTF data: ${Object.keys(mtfData).join(', ')}`);
+
             // ── MTF: 15m data only when running 6H primary ─────────────────
             let historicalData15m = null;
             const _15mBy6h = new Map();
@@ -608,7 +661,7 @@ class TradingBot {
                             const data = await response.json();
                             if (!Array.isArray(data) || data.length === 0) break;
                             all15m = all15m.concat(data);
-                            end = parseInt(data[data.length - 1][0]);
+                            end = parseInt(data[0][0]) - 1; // Move endTime before the oldest candle in this chunk
                             remaining15 -= chunk;
                             await new Promise(resolve => setTimeout(resolve, 200));
                         } catch { break; }
@@ -667,8 +720,8 @@ class TradingBot {
             })();
             const broker = new BrokerSimulation();
             const tradeEngine = new TradeEngine({ strategy: uStrategy, broker, config: {
-                sessionStartMin: 6 * 60,   // 06:00 UTC
-                sessionEndMin: 20 * 60,    // 20:00 UTC
+                sessionStartMin: Number(process.env.SESSION_START_MIN) ?? 0,
+                sessionEndMin: Number(process.env.SESSION_END_MIN) ?? 1439,
                 maxPositionLots: this.MAX_POSITION_LOTS,
                 fixedQuantity: this.FIXED_QUANTITY,
             }});
@@ -696,9 +749,26 @@ class TradingBot {
             let totalSlippageCost = 0;
             let totalCommission = 0;
 
+            // Build rolling MTF windows for each 6H candle index
+            // mtfWindows[i] = { '5m': [...], '15m': [...], '60m': [...], '240m': [...], '1d': [...] }
+            const mtfWindows = new Map();
+            if (Object.keys(mtfData).length > 0) {
+                for (let i = 50; i < historicalData.length; i++) {
+                    const current6HTime = historicalData[i].timestamp.getTime();
+                    const windowMtf = {};
+                    for (const tf of ['5m', '15m', '60m', '240m', '1d']) {
+                        if (mtfData[tf]) {
+                            // Get all MTF candles up to current 6H candle time
+                            windowMtf[tf] = mtfData[tf].filter(c => c.timestamp.getTime() <= current6HTime);
+                        }
+                    }
+                    mtfWindows.set(i, windowMtf);
+                }
+            }
+
             // Loop through data using TradeEngine (unified entry/exit/risk logic)
-            for (let i = 50; i < historicalData.length; i++) {
-                const currentWindow = historicalData.slice(i - 49, i + 1);
+            for (let i = windowSize; i < historicalData.length; i++) {
+                const currentWindow = historicalData.slice(i - windowSize + 1, i + 1);
                 const currentCandle = historicalData[i];
 
                 // Daily reset
@@ -761,6 +831,7 @@ class TradingBot {
                 // ── ENTRY: Evaluate new trade (unified 10-step evaluation) ──
                 if (!activeTrade) {
                     const sub15 = _15mBy6h.get(i);
+                    const windowMtf = mtfWindows.get(i);
                     const entryResult = tradeEngine.evaluateEntry({
                         currentCandle,
                         currentWindow,
@@ -771,6 +842,7 @@ class TradingBot {
                         dailyLossCount,
                         sub15mData: sub15 || null,
                         useMTF: !!(sub15 && sub15.length >= 4),
+                        mtfData: windowMtf || null,
                     });
 
                     // Track regime classification for ALL evaluated candles
@@ -893,7 +965,8 @@ class TradingBot {
                     exitSl: t.sl,
                     tp1: t.tp1, tp2: t.tp2, remainingQuantity: t.remainingQuantity,
                     realizedPnl: t.realizedPnl, tp1Hit: t.tp1Hit, score: t.score, confluence: t.confluence,
-                    exitReason: t.exitReason, regime: t.regime
+                    exitReason: t.exitReason, regime: t.regime,
+                    zlema5TFGate: t.zlema5TFGate || null,
                 })),
                 // Raw price data for optimizer reuse
                 rawPriceData: historicalData,
@@ -974,6 +1047,39 @@ class TradingBot {
             volume: parseFloat(k[5] || 0),
             price: parseFloat(k[4])
         }));
+    }
+
+    // ── MTF: Fetch live multi-timeframe data for ZLEMA 5-TF gate ──
+    async _fetchLiveMTFData() {
+        const now = Date.now();
+        if (this.mtfDataCache && (now - this.mtfDataLastFetch) < this.MTF_CACHE_TTL_MS) {
+            return this.mtfDataCache;
+        }
+
+        const mtfData = {};
+        const tfIntervals = ['5m', '60m', '240m', '1d'];
+        // 15m is already fetched as this.priceData15m
+
+        for (const tf of tfIntervals) {
+            try {
+                const raw = await this._fetchBinanceKlines(tf, 200);
+                if (raw && raw.length > 0) {
+                    mtfData[tf] = this._parseBinanceKlines(raw);
+                }
+            } catch (err) {
+                console.warn(`[Live MTF] Failed to fetch ${tf}: ${err.message}`);
+            }
+        }
+
+        // Include 15m if available
+        if (this.priceData15m && this.priceData15m.length > 0) {
+            mtfData['15m'] = this.priceData15m;
+        }
+
+        this.mtfDataCache = mtfData;
+        this.mtfDataLastFetch = now;
+        console.log(`[Live MTF] Fetched: ${Object.keys(mtfData).join(', ')}`);
+        return mtfData;
     }
 
     // ═══════════════════════════════════════════════════════════════
