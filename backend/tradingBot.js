@@ -439,13 +439,17 @@ class TradingBot {
             }
 
             // Monitor active trades for SL/TP hits using real OHLC candle data
-            const latestCandle = this.priceData[this.priceData.length - 1];
-            this.db.get('SELECT price FROM prices ORDER BY timestamp DESC LIMIT 1', (err, row) => {
-                const currentPrice = row ? row.price : (latestCandle ? latestCandle.price : null);
-                if (currentPrice) {
-                    this.executionEngine.monitorTrades(currentPrice, latestCandle);
-                }
-            });
+            // CRITICAL: Skip monitoring on the same candle a trade was just opened.
+            // The trade should only be evaluated for exit on SUBSEQUENT candles.
+            if (decision.action !== 'BUY' && decision.action !== 'SELL') {
+                const latestCandle = this.priceData[this.priceData.length - 1];
+                this.db.get('SELECT price FROM prices ORDER BY timestamp DESC LIMIT 1', (err, row) => {
+                    const currentPrice = row ? row.price : (latestCandle ? latestCandle.price : null);
+                    if (currentPrice) {
+                        this.executionEngine.monitorTrades(currentPrice, latestCandle);
+                    }
+                });
+            }
             
         } catch (error) {
             console.error('Error in XAU trading loop:', error);
